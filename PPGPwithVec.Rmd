@@ -1,0 +1,1294 @@
+---
+title: "PPGP-Vec"
+author: "Tianhong Liu"
+date: "2025-01-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(lhs)
+library(mvtnorm)
+library(GpGp)
+library(RobustGaSP)
+library(Rcpp)
+library(RcppEigen)
+library(MASS)
+library(ggplot2)
+library(gridExtra)
+library(patchwork)
+sourceCpp("src/demo.cpp")
+```
+
+```{r}
+corr_func <- function(gamma, alpha = 1.9, x1, x2) {
+  exponent = sum((abs(x1-x2)/gamma)^alpha)
+  cov_value <- exp(-exponent)
+  return(cov_value)
+}
+generate_covariance_matrix <- function(X, gamma, alpha, sigma2) {
+  n <- dim(X)[1]
+  covariance_matrix <- matrix(0, n, n)
+  
+  for (i in 1:n) {
+    for (j in 1:n) {
+      covariance_matrix[i, j] <- sigma2 * corr_func(gamma, alpha, X[i,], X[j,])
+    }
+  }
+  return(covariance_matrix)
+}
+
+# Metrics
+# the mean square error
+mse <- function(actual, predicted) {
+  mean((actual - predicted)^2)
+}
+# the empirical coverage probability
+pci <- function(actual, lower, upper){
+  sum(actual >= lower & actual <= upper)/(dim(actual)[1]*dim(actual)[2])
+}
+# the average credible interval length
+lci <- function(lower, upper){
+  mean(upper - lower)
+}
+
+# generate data
+generate_data <-function(n, p, k, gamma_range, sigma2_range, nugget_range){
+  set.seed(2001)
+  Xo = randomLHS(n = n, k = p)
+  Yo <- matrix(0, nrow = n, ncol = k)
+  for (i in 1:k){
+    gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+    sigma2 = runif(n = 1, min = sigma2_range[1], max = sigma2_range[2])
+    nugget = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+    
+    Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+    Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n)
+  
+    Y_i = rmvnorm(1, sigma=Sigma_nugget)
+    Y_i = t(Y_i)
+    Yo[,i] = Y_i
+  }
+  return(list(Xo, Yo))
+}
+
+gamma_range <- c(0.1, 2)
+sigma2_range <- c(0.1, 1)
+nugget_range <- c(0.1, 0.5)
+```
+
+### Parameter Estimation
+First we compare the parameter estimation accuracy of GPVecchia and PPGP when the output is only 1d. We generate some points in a 2d plane and predetermined the parameters in the covariance function. Assuming the mean is 0. 
+
+We also assume the correlation function 
+$$c(x_i, x_j) = \exp\{-\sum_{t=1}^p(\frac{|x_{it}-x_{jt}|}{\gamma_t})^\alpha\}$$
+
+```{r}
+n <- 1000
+lhs_sample <- randomLHS(n, 2)
+
+corr_func <- function(gamma, alpha = 1.9, x1, x2) {
+  exponent = sum((abs(x1-x2)/gamma)^alpha)
+  cov_value <- exp(-exponent)
+  return(cov_value)
+}
+
+x1 = c(10, 5)
+x2 = c(3, 7)
+gamma = c(2,4)
+alpha = 1.9
+corr_func(gamma, alpha, x1, x2)
+```
+
+```{r}
+generate_covariance_matrix <- function(X, gamma, alpha, sigma2) {
+  n <- dim(X)[1]
+  covariance_matrix <- matrix(0, n, n)
+  
+  for (i in 1:n) {
+    for (j in 1:n) {
+      covariance_matrix[i, j] <- sigma2 * corr_func(gamma, alpha, X[i,], X[j,])
+    }
+  }
+  return(covariance_matrix)
+}
+gamma = c(0.89, 2.35)
+alpha = 1.9
+sigma2 = 1.56
+Sigma <- generate_covariance_matrix(lhs_sample, gamma, alpha, sigma2)
+
+eps <- 0.51
+Sigma_nugget <- Sigma + eps * diag(1, n)
+
+Y <- rmvnorm(1, sigma=Sigma_nugget)
+Y <- t(Y)
+
+start_time <- Sys.time()
+fit <- fit_model(Y, lhs_sample, X = NULL, "exponential_anisotropic2D", m_seq = c(10, 30, 60, 90), silent = TRUE)
+end_time <- Sys.time()
+end_time - start_time
+
+fit$covparms
+fit_model
+
+start_time <- Sys.time()
+m.ppgasp=ppgasp(design=lhs_sample,response=Y, zero.mean = "Yes", nugget.est = T, kernel_type = "pow_exp")
+end_time <- Sys.time()
+end_time - start_time
+show(m.ppgasp)
+rgasp(design=lhs_sample,response=Y, zero.mean = "Yes",kernel_type = "pow_exp", num_initial_values = 10)
+
+getAnywhere("find_ordered_nn")
+locs <- randomLHS(100, 2)
+result <- GpGp::find_ordered_nn(locs, m = 10)
+result[1:20,]
+```
+
+```{r}
+# generate simulated data
+n = 1000
+lhs_sample <- randomLHS(n, 5)
+
+z=rnorm(9)
+locs=matrix(1:9,ncol=1)
+vecchia.approx=vecchia_specify(locs, cond.yz = "y",m=3)
+vecchia.approx$U.prep
+?vecchia_specify
+U.obj=createU(vecchia.approx,covparms=c(1,2,.5),nuggets=.2)
+U = as.matrix(U.obj$U)
+image(U, col = heat.colors(100))
+U
+```
+
+```{r}
+# Generate data to test
+set.seed(2001)
+# number of training data 
+n = 1000
+# number of testing data
+np = 1000
+# number of output dimensions
+k = 10
+# number of input dimensions
+p = 5
+# number of the basis functions 
+q = 2 
+# generate input points using LHS
+X <- randomLHS(n + np, p)
+
+# Generate responses. For each output dimension, we generate data using a GP 
+
+# the parameters are: Vector gamma, Scalar sigma2, Scalar nugget
+# we neglect the trend parameters and set the mean to be 0 first 
+
+# with power exponential correlation function with the same set of gamma across all dimensions 
+
+
+# set the range for the gamma, sigma2, and nugget
+gamma_range <- c(0.1, 1)
+sigma2_range <- c(0.1, 2)
+nugget_range <- c(0.1, 1)
+
+# generate response values
+# Y matrix is a N by k matrix
+Y <- matrix(0, nrow = n+np, ncol = k)
+for (i in 1:k){
+  gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+  sigma2 = runif(n = 1, min = sigma2_range[1], max = sigma2_range[2])
+  nugget = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+  
+  Sigma = generate_covariance_matrix(X, gamma, alpha = 1.9, sigma2)
+  Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n+np)
+
+  Y_i = rmvnorm(1, sigma=Sigma_nugget)
+  Y_i = t(Y_i)
+  Y[,i] = Y_i
+}
+
+# randomly separate the training from the testing values
+train_indices <- sample(1:nrow(X), size = n)
+Xo <- X[train_indices, ]
+Xp <- X[-train_indices, ]
+
+Yo <- Y[train_indices, ]
+Yp <- Y[-train_indices, ]
+```
+
+```{r}
+# Apply PPGP on the data
+start_time <- Sys.time()
+m.ppgasp=ppgasp(design=Xo,response=Yo, nugget.est = T, kernel_type = "pow_exp", zero.mean = "No", optimization = 'lbfgs')
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 1.455938 mins
+show(m.ppgasp)
+m_pred.ppgasp = RobustGaSP::predict(m.ppgasp, testing_input = Xp)
+?ppgasp
+
+"Question: When train with 0 mean, can not predict with 0 mean"
+
+full_mse_lbfgs <- mse(Yp, m_pred.ppgasp$mean)
+
+full_pci_lbfgs <- pci(Yp, m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+
+full_lci_lbfgs <- lci(m_pred.ppgasp$lower95,  m_pred.ppgasp$upper95)
+```
+
+```{r}
+# Apply PPGP on the data
+start_time <- Sys.time()
+m.ppgasp=ppgasp(design=Xo,response=Yo, nugget.est = T, kernel_type = "pow_exp")
+end_time <- Sys.time()
+full_time_lbgfs <- end_time - start_time
+show(m.ppgasp)
+m_pred.ppgasp = RobustGaSP::predict(m.ppgasp, testing_input = Xp)
+
+"Question: When train with 0 mean, can not predict with 0 mean"
+
+full_mse_lbfgs <- mse(Yp, m_pred.ppgasp$mean)
+
+# the empirical coverage probability
+pci <- function(actual, lower, upper){
+  sum(actual >= lower & actual <= upper)/(dim(actual)[1]*dim(actual)[2])
+}
+full_pci_lbfgs <- pci(Yp, m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+
+# the average credible interval length
+lci <- function(lower, upper){
+  mean(upper - lower)
+}
+full_lci_lbfgs <- lci(m_pred.ppgasp$lower95,  m_pred.ppgasp$upper95)
+```
+
+```{r}
+# Apply PPGP on the data
+start_time <- Sys.time()
+m.ppgasp_nm=ppgasp(design=Xo,response=Yo, nugget.est = T, zero.mean = "Yes", kernel_type = "pow_exp", optimization = "nelder-mead")
+?ppgasp
+m.ppgasp_marginal=ppgasp(design=Xo,response=Yo, nugget.est = T, zero.mean = "Yes", kernel_type = "pow_exp", optimization = "nelder-mead",method='mmle')
+
+end_time <- Sys.time()
+full_nm_time <- end_time - start_time
+# Time difference of 1.691422 mins
+show(m.ppgasp_nm)
+m_pred.ppgasp_nm = predict(m.ppgasp_nm, testing_input = Xp, testing_trend = matrix(0, dim(Xp)[1], 1))
+
+"Question: When train with 0 mean, can not predict with 0 mean"
+
+full_mse_nm <- mse(Yp, m_pred.ppgasp_nm$mean)
+
+full_pci_nm <- pci(Yp, m_pred.ppgasp_nm$lower95, m_pred.ppgasp_nm$upper95)
+
+full_lci_nm <- lci(m_pred.ppgasp_nm$lower95,  m_pred.ppgasp_nm$upper95)
+
+# PPGP trained by the Nelder-Mead method has smaller mse
+# similar coverage probability and credible interval length
+```
+
+```{r}
+sourceCpp("src/demo.cpp")
+
+# define parameter values
+gamma <- c(1, 2, 3, 4, 5)
+nu <- 1
+alpha <- 1.9
+
+# test with random samples
+set.seed(2001)
+lhs_sample <- randomLHS(n = 10, 5)
+maxmin_order <- GpGp::order_maxmin(lhs_sample)
+ordered_sample <- lhs_sample[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 3)
+
+set.seed(2001)
+lhs_sample <- randomLHS(n = 1000, 5)
+maxmin_order <- GpGp::order_maxmin(lhs_sample)
+ordered_sample <- lhs_sample[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 50)
+
+set.seed(2001)
+# start_time = Sys.time()
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 50)
+
+# testing functions 
+sum_log_diag = Umatrix(ordered_sample, nnmatrix, gamma, nu, alpha)[[2]]
+U = Umatrix(ordered_sample, nnmatrix, gamma, nu, alpha)[[1]]
+U[1:40, 1:40]
+temp <-neg_vecchia_marginal_log_likelihood(c(gamma,nu),ordered_sample, nnmatrix, Yo,
+                                          alpha)
+```
+
+
+```{r}
+# learn the parameters
+sourceCpp("src/demo.cpp")
+
+set.seed(2001)
+start_time = Sys.time()
+optim(par = c(gamma_ini, nu_ini), fn = neg_vecchia_marginal_log_likelihood, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, alpha = 1.9, method = "Nelder-Mead")
+end_time = Sys.time()
+end_time - start_time
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(gamma_ini,nu_ini), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), x = ordered_sample, NNmatrix = nnmatrix, y = Yo, alpha = 1.9, method = "L-BFGS-B")
+end_time = Sys.time()
+end_time - start_time
+# end_time = Sys.time()
+# end_time - start_time
+# Time difference of 28.97217 secs
+
+gamma_ini <- runif(n = 5, min = 0, max = 1)
+nu_ini <- runif(n = 1, min = 0, max = 1)
+ini_value = c(gamma_ini, nu_ini)
+
+neg_vecchia_marginal_log_likelihood_deriv(ini_value, ordered_sample, nnmatrix, Yo, alpha = 1.9)
+
+# code the profile likelihood starting with 1d case (1 gamma) or 2d case (1 gamma, 1 nu)
+# plot them
+# and then apply the approximation and see the difference
+
+# compare full likelihood with approximated likelihood
+
+```
+
+```{r}
+sourceCpp("src/demo.cpp")
+q_025 = qt(0.025, df = n)
+q_975 = qt(0.975, df = n)
+gamma = c(9.629243, 21.325652, 57.259176,101.561833,69.804802)
+nu =   4369.741223
+pred100 = predict(ordered_sample, Xp, nnmatrix, Yo, gamma, nu, alpha, q_025, q_975)
+
+pred_mean50 = pred[[1]]
+lower50 = pred[[2]]
+upper50 = pred[[3]]
+
+mse(Yp, pred_mean50)
+pci(Yp, lower, upper50)
+lci(lower, upper50)
+
+pred_mean100 = pred100[[1]]
+lower100 = pred100[[2]]
+upper100 = pred100[[3]]
+
+mse(Yp, pred_mean100)
+pci(Yp, lower100, upper100)
+lci(lower100, upper100)
+```
+
+```{r plot_ordering}
+# test the order_maxmin function and find_ordered_nn function
+set.seed(2001)
+n = 20
+Xo = randomLHS(n = n, k = 2)
+
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- matrix(Xo[maxmin_order,], nrow = n)
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 5)
+
+locs <- as.matrix( expand.grid( (1:40)/40, (1:40)/40 ) )     
+ord <- order_maxmin(locs)        # calculate an ordering
+locsord <- locs[ord,]            # reorder locations
+m <- 20
+NNarray <- find_ordered_nn(locsord,20)  # find ordered nearest 20 neighbors
+ind <- 24
+# plot all locations in gray, first ind locations in black,
+# ind location with magenta circle, m neighhbors with blue circle
+plot( locs[,1], locs[,2], pch = 16, col = "gray" )
+points( locsord[1:ind,1], locsord[1:ind,2], pch = 16 )
+points( locsord[ind,1], locsord[ind,2], col = "magenta", cex = 1.5 )
+points( locsord[NNarray[ind,2:(m+1)],1], 
+    locsord[NNarray[ind,2:(m+1)],2], col = "blue", cex = 1.5 )
+
+
+grid <- as.matrix(expand.grid(x = 1:10, y = 1:10))
+middleout_order <- GpGp::order_middleout(grid)
+ordered_sample = matrix(grid[middleout_order,], nrow = 100)
+random_points = data.frame(ordered_sample[1:20,])
+
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 5)
+
+middleout <- ggplot() +
+  geom_point(data = grid, aes(x = x, y = y), size = 4, color = "grey") +
+  geom_point(data = random_points, aes(x = X1, y = X2), size = 4, color = "black") +
+  geom_point(data = random_points[9, ], aes(x = X1, y = X2), color = "red", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_point(data = random_points[c(3, 7, 1, 4, 5), ],aes(x = X1, y = X2),
+             color = "blue", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_text(data = random_points[c(3, 1, 4, 5), ], aes(x = X1, y = X2), 
+            label = c("3", "1", "4", "5"), hjust = -1.5, vjust = 1, size = 6) +
+  geom_text(data = random_points[c(7, 9), ], aes(x = X1, y = X2), 
+            label = c("7", "9"), hjust = 2.5, vjust = 1, size = 6) +
+  theme_minimal() + theme(
+    plot.margin = margin(t = 0, r = 20, b = 0, l = 0),
+    panel.grid = element_blank(),
+    axis.title = element_blank(),
+    axis.text = element_blank()
+  )
+
+set.seed(2000)
+maxmin_order <- GpGp::order_maxmin(grid)
+ordered_sample = matrix(grid[maxmin_order,], nrow = 100)
+random_points = data.frame(ordered_sample[1:20,])
+
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 5)
+
+maxmin <- ggplot() +
+  geom_point(data = grid, aes(x = x, y = y), size = 4, color = "grey") +
+  geom_point(data = random_points, aes(x = X1, y = X2), size = 4, color = "black") +
+  geom_point(data = random_points[9, ], aes(x = X1, y = X2), color = "red", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_point(data = random_points[c(8,4,3,6,7), ],aes(x = X1, y = X2),
+             color = "blue", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_text(data = random_points[c(8,4,3,6,7,9), ], aes(x = X1, y = X2), 
+            label = c("8", "4", "3", "6", "7", "9"), hjust = -1.5, vjust = 1, size = 6) +
+  theme_minimal() + theme(
+    plot.margin = margin(t = 0, r = 20, b = 0, l = 20),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    axis.text = element_blank()
+  )
+
+coor_order <- GpGp::order_coordinate(grid, coordinate = c(1,2))
+ordered_sample = matrix(grid[coor_order,], nrow = 100)
+random_points = data.frame(ordered_sample[1:20,])
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 5)
+
+coor <- ggplot() +
+  geom_point(data = grid, aes(x = x, y = y), size = 4, color = "grey") +
+  geom_point(data = random_points, aes(x = X1, y = X2), size = 4, color = "black") +
+  geom_point(data = random_points[9, ], aes(x = X1, y = X2), color = "red", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_point(data = random_points[c(5,6,8,3,2), ],aes(x = X1, y = X2),
+             color = "blue", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_text(data = random_points[c(5,6,8,3,2,9), ], aes(x = X1, y = X2), 
+            label = c("5", "6", "8", "3", "2", "9"), hjust = -1.5, vjust = 1, size = 6) +
+  theme_minimal() + theme(
+    plot.margin = margin(t = 0, r = 20, b = 0, l = 20),
+    panel.grid = element_blank(),
+    axis.title = element_blank(),
+    axis.text = element_blank()
+  )
+
+set.seed(2001)
+random_order <- sample(seq(100), size = 100, replace = FALSE)
+ordered_sample = matrix(grid[random_order,], nrow = 100)
+random_points = data.frame(ordered_sample[1:20,])
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 5)
+random <- ggplot() +
+  geom_point(data = grid, aes(x = x, y = y), size = 4, color = "grey") +
+  geom_point(data = random_points, aes(x = X1, y = X2), size = 4, color = "black") +
+  geom_point(data = random_points[9, ], aes(x = X1, y = X2), color = "red", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_point(data = random_points[c(6,3,1,8,7), ],aes(x = X1, y = X2),
+             color = "blue", size = 5.5, shape = 1, stroke = 1.5) +
+  geom_text(data = random_points[c(6,3,1,8,7,9), ], aes(x = X1, y = X2), 
+            label = c("6", "3", "1", "8", "7", "9"), hjust = -1.5, vjust = 1, size = 6) +
+  theme_minimal() + theme(
+    plot.margin = margin(t = 0, r = 0, b = 0, l = 20),
+    panel.grid = element_blank(),
+    axis.title = element_blank(),
+    axis.text = element_blank()
+  )
+combined = (middleout + maxmin + coor + random) + plot_layout(ncol = 4, guides = "collect")
+ggsave("orderings.png", combined, width = 22, height = 5, dpi = 300) 
+```
+
+```{r}
+n <- 30             # Number of locations
+d <- 1         # dimension of domain
+locs <- matrix( runif(n*d), n, d )
+ord1 <- order_coordinate(locs, 1 )
+ord12 <- order_coordinate(locs, c(1,2) )
+
+df <- data.frame(locs)
+df$order = ord1
+ggplot(df, aes(x = locs, y = 0)) +
+  geom_point(size = 1) +
+  geom_text(aes(label = order), hjust = 0, vjust = 2, size = 1.5) +
+  theme_minimal()
+```
+
+
+```{r}
+# test the Vecchia likelihood function
+sourceCpp("src/demo.cpp")
+
+# first test the simple 1-D case
+# one gamma, no nugget.
+set.seed(2001)
+n = 100
+Xo = randomLHS(n = n, k = 1)
+gamma = 2
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- matrix(Xo[maxmin_order,], nrow = n)
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+
+U = Umatrix(ordered_sample, nnmatrix, gamma = c(gamma), nu = 0, alpha = 1.9)[[1]]
+
+# Check whether the precision matrix generate by the Vecchia with m = n-1
+# and PPGP are the same
+UUt_inv = U %*% t(U)
+
+R0 = generate_R0(ordered_sample, ordered_sample)
+R = separable_multi_kernel(R0, beta = c(1/gamma), kernel_type = c(1), alpha = 1.9)
+
+R_inv = solve(R)
+
+# for 1d data case, the precision matrices are the same up to some small errors
+R_inv[1:5, 1:5]
+UUt_inv[1:5, 1:5]
+
+# now test for 2d case
+set.seed(2001)
+n = 100
+Xo = randomLHS(n = n, k = 2)
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- matrix(Xo[maxmin_order,], nrow = n)
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+
+gamma = c(2,3)
+
+R0 = generate_R0(Xo, Xo)
+R = separable_multi_kernel(R0, beta = 1/gamma, kernel_type = c(1,1), alpha = c(1.9, 1.9))
+
+U = Umatrix(Xo, nnmatrix, gamma = gamma, nu = 0, alpha = 1.9)[[1]]
+UUt_inv = U %*% t(U)
+
+R_inv = solve(R)
+
+# for 2d case the precision matrices are also the same. 
+R_inv[1:5,1:5]
+UUt_inv[1:5,1:5]
+
+# Thus the U matrix function is correct (up to some small errors due to rounding and inversion)
+maxmin_order
+```
+
+```{r}
+# now test the likelihood function, still start with 1d case
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+n = 1000
+Xo = randomLHS(n = n, k = 1)
+
+gamma = 2
+sigma2 = 1
+nu = 0
+Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+Yo = mvrnorm(n=1, mu = rep(0,n), Sigma = Sigma)
+Yo = matrix(Yo, nrow = n)
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+
+res_vec = neg_vecchia_marginal_log_likelihood_1d(params = c(gamma), x = Xo, NNmatrix = 
+                                      nnmatrix, y = matrix(Yo, nrow = n), 
+                                    alpha = 1.9)
+R0 = generate_R0(Xo, Xo)
+log_inv_gamma = log(1/gamma)
+# the input type of kernel_type is wrong. It only takes integer, not string
+res = log_marginal_lik_ppgasp(param = c(log_inv_gamma), nugget = 0, nugget_est = FALSE,
+                        R0 = R0, X = matrix(0, nrow = n), zero_mean = "Yes", 
+                        output = Yo, kernel_type = 1, alpha = 1.9)
+
+# the likelihood are the same when m = n - 1
+```
+
+```{r}
+# now try 2d case
+n = 100
+Xo = randomLHS(n = n, k = 2)
+
+gamma = c(2,3)
+sigma2 = 1
+nu = 0
+Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+Yo = mvrnorm(n=1, mu = rep(0,n), Sigma = Sigma)
+Yo = matrix(Yo, nrow = n)
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+
+res_vec = neg_vecchia_marginal_log_likelihood_1d(params = gamma, x = Xo, NNmatrix = 
+                                      nnmatrix, y = matrix(Yo, nrow = n), 
+                                    alpha = 1.9)
+res_vec[[1]]
+
+R0 = generate_R0(Xo, Xo)
+log_inv_gamma = log(1/gamma)
+# the input type of kernel_type is wrong. It only takes integer, not string
+res = log_marginal_lik_ppgasp(param = c(log_inv_gamma), nugget = 0, nugget_est = FALSE,
+                        R0 = R0, X = matrix(0, nrow = n), zero_mean = "Yes", 
+                        output = Yo, kernel_type = c(1,1), alpha = c(1.9, 1.9))
+res[[1]]
+# the likelihood are still the same
+```
+
+```{r likelihood_2gamma_1nu}
+# now we add a nugget, 2 gamma, 1 nu.
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+n = 100
+Xo = randomLHS(n = n, k = 2)
+
+gamma = c(2, 3)
+sigma2 = 1
+nu = 2
+Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+Sigma = Sigma + diag(nu, nrow = n, ncol = n)
+Yo = mvrnorm(n=1, mu = rep(0,n), Sigma = Sigma)
+Yo = matrix(Yo, nrow = n)
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+
+res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), nu = 1, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), kernel_type = "matern_5_2", alpha = 1.9, zero_mean = "No")
+
+
+R0 = generate_R0(ordered_sample, ordered_sample)
+log_inv_gamma = log(1/gamma)
+# the input type of kernel_type is wrong. It only takes integer, not string
+log_nu = log(nu)
+res = RobustGaSP::log_marginal_lik_ppgasp(param = c(log_inv_gamma, log_nu), nugget = 2, nugget_est = TRUE,
+                        R0 = R0, X = matrix(1, nrow = n), zero_mean = "No", 
+                        output = Yo, kernel_type = c(3,3), alpha = c(1.9,1.9))
+c(res_vec[[1]], res[[1]])
+# the likelihood are still the same
+
+```
+
+```{r likelihood_plot}
+# plot likelihood against gamma, nu, and m
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+n = 500
+np = 100 
+p = 5
+k = 10
+Xo = randomLHS(n = n+np, k = p)
+
+gamma_range = c(0.1, 2)
+sigma2_range = c(0.1, 1)
+nugget_range = c(0.1, 2)
+Yo <- matrix(0, nrow = n+np, ncol = k)
+for (i in 1:k){
+  gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+  sigma2 = 1
+  nugget = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+  
+  Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+  Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n+np)
+
+  Y_i = rmvnorm(1, sigma=Sigma_nugget)
+  Y_i = t(Y_i)
+  Yo[,i] = Y_i
+}
+
+m = c(1, 5, round(seq(10, n-1, length.out = 50)))
+
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+ordered_Yo <- Yo[maxmin_order,]
+
+X_train <- ordered_sample[1:500,]
+X_test <- ordered_sample[501:600,]
+Y_train <- ordered_Yo[1:500,]
+Y_test <- ordered_Yo[501:600,]
+
+gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+
+vec_list = c()
+lik_time_list = c()
+train_time_list = c()
+pred_time_list = c()
+mse_list = c()
+pci_list = c()
+lci_list = c()
+for (i in 1:length(m)){
+  start_time = Sys.time()
+  set.seed(2001)
+  nnmatrix <- GpGp::find_ordered_nn(X_train, m = m[i])
+  res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), nu = 1, nugget_est = TRUE, x = X_train, NNmatrix = 
+                                        nnmatrix, y = Y_train, 
+                                      kernel_type = "pow_exp", alpha = 1.9)
+  end_time = Sys.time()
+  lik_time_used = as.numeric(end_time - start_time)
+  vec_list = c(vec_list, res_vec)
+  lik_time_list = c(lik_time_list, lik_time_used)
+  
+  start_time = Sys.time()
+  set.seed(2001)
+  res = optim(par = c(gamma, nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = TRUE, x = X_train, NNmatrix = nnmatrix, y = Y_train, kernel_type = "pow_exp", alpha = 1.9, method = "L-BFGS-B")
+  end_time = Sys.time()
+  train_time_used = as.numeric(end_time - start_time)
+  train_time_list = c(train_time_list, train_time_used)
+  
+  start_time = Sys.time()
+  set.seed(2001)
+  nnmatrix_all = GpGp::find_ordered_nn(ordered_sample, m = m[i])
+  list = predict(x = X_train, xp = X_test, NNmatrix = nnmatrix_all, y = Y_train, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "pow_exp", alpha = 1.9, q = qnorm(0.975, 0, 1))
+  end_time = Sys.time()
+  pred_time_used = as.numeric(end_time - start_time)
+  pred_time_list = c(pred_time_list, pred_time_used)
+  
+  mse1 = mse(Y_test, list[[1]])
+  mse_list = c(mse_list, mse1)
+  pci1 = pci(Y_test, list[[2]], list[[3]])
+  pci_list = c(pci_list, pci1)
+  lci1 = lci(list[[2]], list[[3]])
+  lci_list = c(lci_list, lci1)
+}
+
+R0 = generate_R0(X_train, X_train)
+log_inv_gamma = log(1/gamma)
+
+start_time = Sys.time()
+res = RobustGaSP::log_marginal_lik_ppgasp(param = c(log_inv_gamma), nugget = nu, nugget_est = TRUE,
+                        R0 = R0, X = matrix(0, nrow = n), zero_mean = "No", 
+                        output = Y_train, kernel_type = c(1,1,1,1,1), alpha = c(1.9,1.9,1.9,1.9,1.9))
+end_time = Sys.time()
+as.numeric(end_time - start_time)
+
+df = data.frame(m = m, loglik = vec_list)
+loglik = ggplot(df, aes(x = m, y = loglik)) + 
+  geom_line(aes(color = "Vec-PPGP")) + 
+  geom_point(aes(color = "Vec-PPGP")) + 
+  geom_hline(aes(yintercept = -res[[1]], color = "PPGP"), linetype = "dashed", size = 0.5) +
+  scale_color_manual(values = c("Vec-PPGP" = "black", "PPGP" = "red")) +
+  labs(x = "m", y = "Negative Log-Likelihood", title = "Negative Log-Likelihood versus the Number of Neighbors in Vec-PPGP", color = "Legend") + 
+  theme(plot.title = element_text(size = 10))
+
+
+df = data.frame(m = m, time = lik_time_list)
+time_plot = ggplot(df, aes(x = m, y = time)) + 
+  geom_line() + 
+  geom_point() + 
+  labs(x = "m", y = "Time (s)", title = "Likelihood Computation Time versus the Number of Neighbors in Vec-PPGP") + 
+  theme(plot.title = element_text(size = 10))
+
+combined = (loglik + time_plot) + plot_layout(guides = "collect")
+ggsave("combined.png", combined, width = 12, height = 5, dpi = 300)
+
+length(mse_list)
+#TODO: Pred time against m, mse against m, coverage probability with m, legnth with m.
+```
+
+```{r likelihood_large_scale}
+# check the likelihood in higher dimension with nugget and larger datasize
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+n = 1500
+p = 5
+k = 10
+Xo = randomLHS(n = n, k = 5)
+
+gamma_range = c(0.1, 2)
+sigma2_range = c(0.1, 1)
+nugget_range = c(0.1, 2)
+Yo <- matrix(0, nrow = n, ncol = k)
+for (i in 1:k){
+  gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+  sigma2 = 1
+  nugget = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+  
+  Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+  Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n)
+
+  Y_i = rmvnorm(1, sigma=Sigma_nugget)
+  Y_i = t(Y_i)
+  Yo[,i] = Y_i
+}
+
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+nu = 1
+
+res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), x = ordered_sample, NNmatrix = 
+                                        nnmatrix, y = Yo, 
+                                      alpha = 1.9)
+
+R0 = generate_R0(ordered_sample, ordered_sample)
+log_inv_gamma = log(1/gamma)
+# the input type of kernel_type is wrong. It only takes integer, not string
+res = log_marginal_lik_ppgasp(param = c(log_inv_gamma, -1), nugget = 1, nugget_est = FALSE,
+                        R0 = R0, X = matrix(0, nrow = n), zero_mean = "Yes", 
+                        output = Yo, kernel_type = rep(1,5), alpha = rep(1.9,5))
+res[[1]]
+res_vec[[1]]
+# the results are the same up to a small error
+```
+
+```{r likelihood_parameters}
+n = 500
+p = 1
+k = 5
+temp = generate_data(n = n, p = p, k = k, gamma_range = c(0, 2), sigma2_range = c(0,0.5), nugget_range = c(0,1))
+Xo = temp[[1]]
+Yo = temp[[2]]
+
+n_param = 100
+# tau and eta is from -1 to 1
+tau = seq(-2, 2, length.out = n_param)
+eta = seq(-2, 2, length.out = n_param)
+# nu and gamma are from 0.36 to 2.718
+nu = exp(tau)
+gamma = 1/exp(eta)
+
+m_list = round(c(n-1, n/2, n/4, n/6, n/8, n/10))
+
+matrix_list = lapply(1:length(m_list), function(x) matrix(0, nrow = 100, ncol = 100))
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- as.matrix(Xo[maxmin_order,])
+ordered_response <- Yo[maxmin_order,]
+for (i in 1:length(m_list)){
+  print(m_list[i])
+  nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = i)
+  for (j in 1:n_param){
+    for (k in 1:n_param){
+      gamma_j = gamma[j]
+      nu_k = nu[k]
+      res = neg_vecchia_marginal_log_likelihood(params = c(gamma_j, nu_k), x =ordered_sample,NNmatrix = nnmatrix, y = ordered_response, kernel_type = "pow_exp", nu = 0, nugget_est = TRUE, alpha = 1.9)
+      matrix_list[[i]][j,k] = res
+    }
+  }
+}
+
+z_df <- expand.grid(X = eta, Y = tau)
+z_df$Z <- as.vector(t(matrix_list[[1]]))
+
+ggplot(z_df, aes(X, Y, fill = Z)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  labs(title = "Heatmap with ggplot2", fill = "Z") +
+  theme_minimal()
+
+filled.contour(eta, tau, t(matrix_list[[1]]),
+               color.palette = terrain.colors,
+               xlab = "X", ylab = "Y",
+               main = "Filled Contour Plot")
+```
+
+
+
+```{r deriv_1gamma}
+# check the derivative of the likelihood
+# first check the 1d case, no nugget
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+n = 100
+Xo = randomLHS(n = n, k = 1)
+
+gamma = 3
+sigma2 = 1
+nu = 0
+Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+Sigma = Sigma + diag(nu, nrow = n, ncol = n)
+Yo = mvrnorm(n=1, mu = rep(0,n), Sigma = Sigma)
+Yo = matrix(Yo, nrow = n)
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- matrix(Xo[maxmin_order,], nrow = n)
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+
+
+R0 = generate_R0(ordered_sample, ordered_sample)
+log_inv_gamma = log(1/gamma)
+log_like_deriv = log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma), nugget = 0, nugget_est = FALSE, R0 = R0, X = matrix(0, ncol = n), zero_mean = "Yes", output = Yo, kernel_type = 2, alpha = 1.9)
+
+neg_log_like_vec_deriv = neg_vecchia_marginal_log_likelihood_deriv(params = c(gamma), nu = 0, nugget_est = FALSE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, kernel_type = "matern_3_2", alpha = 1.9)[[1]]
+
+7.70137 / 9
+# the results are the same
+```
+Note that in ppgasp, the derivative is w.r.t the inverse of range parameters.
+$$\frac{\partial l(\gamma)}{\partial 1/\gamma} = \frac{\partial l(\gamma)}{\partial\gamma}\frac{\partial\gamma}{\partial1/\gamma} = \frac{\partial- l(\gamma)}{\partial\gamma} \gamma^2$$
+```{r deriv_2gamma_nugget}
+# check the derivative of the likelihood 2 gamma with nugget
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+n = 100
+Xo = randomLHS(n = n, k = 2)
+
+gamma = c(2,3)
+sigma2 = 1
+nu = 0.2
+Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+Sigma = Sigma + diag(nu, nrow = n, ncol = n)
+Yo = mvrnorm(n=1, mu = rep(0,n), Sigma = Sigma)
+Yo = matrix(Yo, nrow = n)
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+
+R0 = generate_R0(ordered_sample, ordered_sample)
+log_inv_gamma = log(1/gamma)
+# What is the nugget-variance ratio parameter?
+# Why the derivative of gamma is different when nugget_est = TRUE/FALSE?
+# since the input is the log of nugget-variance ratio, if the ratio is 1, then the input should 
+# be log(1) = 0. The length of alpha/kernel_type should be the same as gamma
+log_nu = log(nu)
+log_like_deriv = RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, log_nu), nugget = nu, nugget_est = TRUE, R0 = R0, X = matrix(1, nrow = n), zero_mean = "Yes",output = Yo, kernel_type = c(3,3), alpha =c(1.9,1.9))
+
+temp = neg_vecchia_marginal_log_likelihood_deriv(params = c(gamma, nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), zero_mean = "Yes", kernel_type = "matern_5_2", alpha = 1.9)
+```
+
+```{r deriv_with_mean}
+# check the derivative with mean
+set.seed(2001)
+temp = generate_data(n = 200, p = 5, k = 5, gamma_range, sigma2_range, nugget_range)
+n = 200
+p = 5
+Xo = temp[[1]]
+Yo = temp[[2]]
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+
+neg_vecchia_marginal_log_likelihood_deriv(c(gamma,nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "pow_exp", alpha = 1.9, zero_mean = "Yes")
+
+R0 = generate_R0(ordered_sample, ordered_sample)
+log_inv_gamma = log(1/gamma)
+
+RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, nu), nugget = nu, nugget_est = TRUE, R0 = R0, X = matrix(1, ncol = n), zero_mean = "No",output = Yo, kernel_type = c(1,1,1,1,1), alpha =c(1.9,1.9,1.9,1.9,1.9))
+```
+
+```{r optim_fixed_nugget}
+# maybe we need to reparameterize the parameters so the optimization is stable
+
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+n = 1500
+p = 5
+k = 5
+Xo = randomLHS(n = n, k = k)
+
+gamma_range = c(0.1, 2)
+sigma2_range = c(0.1, 1)
+nugget_range = c(0.1, 0.5)
+Yo <- matrix(0, nrow = n, ncol = k)
+for (i in 1:k){
+  gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+  sigma2 = 1
+  nugget = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+  
+  Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
+  Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n)
+
+  Y_i = rmvnorm(1, sigma=Sigma_nugget)
+  Y_i = t(Y_i)
+  Yo[,i] = Y_i
+}
+
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(gamma), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = nu, nugget_est = FALSE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, alpha = 1.9, method = "BFGS")
+end_time = Sys.time()
+end_time - start_time
+
+start_time <- Sys.time()
+m.ppgasp=ppgasp(design=ordered_sample, response=Yo, nugget = nu, nugget.est = FALSE, zero.mean = "Yes", kernel_type = "pow_exp")
+end_time <- Sys.time()
+show(m.ppgasp)
+
+# the estimated parameters look like they are in the reasonable range compared to ppgasp
+```
+
+```{r pred_fixed_nugget}
+# this code trains and predicts on the simulated data with fixed nugget
+# try different kernel type: pow_exp, matern_3_2, matern_5_2
+# generate the data in likelihood_large_scale chunk
+m = 50
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+ordered_response <- Yo[maxmin_order,]
+
+X_train_ordered <- ordered_sample[1:1000,]
+X_test_ordered <- ordered_sample[1001:1500,]
+Y_train_ordered <- ordered_response[1:1000,]
+Y_test_ordered <- ordered_response[1001:1500,]
+
+# try: train with small m, predict with larger m 
+nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+
+gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(gamma), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = FALSE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_5_2", alpha = 1.9, method = "L-BFGS-B")
+end_time = Sys.time()
+end_time - start_time
+# 21.89422 secs
+
+## Compare to PPGP 
+start_time <- Sys.time()
+m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget = 1, nugget.est = F, kernel_type = "matern_5_2", zero.mean = "No", optimization = 'lbfgs')
+end_time <- Sys.time()
+end_time - start_time
+# Time difference without the nugget estimation is 37.43615 secs
+# With nugget estimation is 1.182473 mins
+
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par, nu = 1, kernel_type = "matern_5_2", alpha = 1.9, q = qnorm(0.975, 0, 1))
+
+mse(Y_test_ordered, list[[1]])
+pci(Y_test_ordered, list[[2]], list[[3]])
+lci(list[[2]], list[[3]])
+
+m_pred.ppgasp = RobustGaSP::predict(m.ppgasp, testing_input = X_test_ordered)
+mse(Y_test_ordered, m_pred.ppgasp$mean)
+pci(Y_test_ordered, m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+lci(m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+
+# Vecchia achieves similar performances with m = 50
+```
+
+```{r pred_est_nugget}
+# this code trains and predicts on the simulated data with estimated nugget
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(gamma, nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = nu, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_5_2",alpha = 1.9, method = "L-BFGS-B")
+end_time = Sys.time()
+end_time - start_time
+# Time difference of 47.37236 secs
+
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "matern_5_2", alpha = 1.9, q = qnorm(0.975, 0, 1))
+
+mse(Y_test_ordered, list[[1]])
+pci(Y_test_ordered, list[[2]], list[[3]])
+lci(list[[2]], list[[3]])
+
+## Compare to PPGP 
+start_time <- Sys.time()
+m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget.est = T, kernel_type = "matern_5_2", zero.mean = "No", optimization = 'lbfgs')
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 1.729538 mins
+
+m_pred.ppgasp = RobustGaSP::predict(m.ppgasp, testing_input = X_test_ordered)
+mse(Y_test_ordered, m_pred.ppgasp$mean)
+pci(Y_test_ordered, m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+lci(m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+```
+
+```{r pred_real_data}
+library(repmis)
+source_data("https://github.com/MengyangGu/TITAN2D/blob/master/TITAN2D.rda?raw=True")
+
+set.seed(2001)
+m = 30
+maxmin_order <- GpGp::order_maxmin(input_variables[,1:3])
+ordered_sample <- input_variables[maxmin_order,1:3]
+ordered_response <- pyroclastic_flow_heights[maxmin_order,]
+
+X_train_ordered = ordered_sample[1:200,]
+X_test_ordered = ordered_sample[201:683,]
+Y_train_ordered = ordered_response[1:200,] #which(loc_index[1,]==1)
+Y_test_ordered = ordered_response[201:683,]
+
+n=dim(Y_train_ordered)[1]
+n_testing=dim(Y_test_ordered)[1]
+
+##delete those location where all output are zero
+
+index_all_zero=NULL
+for(i_loc in 1:dim(Y_train_ordered)[2]){
+  if(sum(Y_train_ordered[,i_loc]==0)==200){
+    index_all_zero=c(index_all_zero,i_loc)
+  }
+}
+
+##transforming the output
+Y_train_ordered_log_1=log(Y_train_ordered+1)
+k=dim(Y_train_ordered_log_1[,-index_all_zero])[2]
+
+# 
+
+system.time(
+  for(i in 1:1){
+    m.ppgasp=ppgasp(design=X_train_ordered,
+                    response=as.matrix(Y_train_ordered_log_1[,-index_all_zero]),
+                    trend=cbind(rep(1,n),X_train_ordered[,1]),
+                    nugget.est=T,max_eval=100,num_initial_values=3,
+                    optimization='nelder-mead')
+    pred_ppgasp=predict.ppgasp(m.ppgasp,X_test_ordered,
+                               testing_trend=cbind(rep(1,n_testing),
+                                                   X_test_ordered[,1]))
+    ##transforming back for prediction
+    
+    m_pred_ppgasp_mean=exp(pred_ppgasp$mean)-1
+    m_pred_ppgasp_LB=exp(pred_ppgasp$lower95)-1
+    m_pred_ppgasp_UB=exp(pred_ppgasp$upper95)-1
+    
+    m_pred_ppgasp_mean[which(m_pred_ppgasp_mean<0)]=0
+    m_pred_ppgasp_LB[which(m_pred_ppgasp_LB<0)]=0
+    m_pred_ppgasp_UB[which(m_pred_ppgasp_UB<0)]=0
+  }
+)
+# time used 161.086 for n = 200
+# 12.488s for n = 50 
+
+mse(as.matrix(Y_test_ordered[,-index_all_zero]), m_pred_ppgasp_mean)
+pci(as.matrix(Y_test_ordered[,-index_all_zero]), m_pred_ppgasp_LB, m_pred_ppgasp_UB)
+lci(m_pred_ppgasp_LB, m_pred_ppgasp_UB)
+
+nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+
+gamma = runif(n = 3, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(gamma,nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), alpha = 1.9, method = "L-BFGS-B")
+end_time = Sys.time()
+end_time - start_time
+# Time difference of 359.4098 s for n = 50
+# Time difference of 4.5275 s
+
+list = predict(x = as.matrix(X_train_ordered), xp = as.matrix(X_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], alpha = 1.9, q = qnorm(0.975, 0, 1))
+
+# transform back
+vec_ppgasp_mean=exp(list[[1]])-1
+vec_ppgasp_LB=exp(list[[2]])-1
+vec_ppgasp_UB=exp(list[[3]])-1
+vec_ppgasp_mean[which(vec_ppgasp_mean<0)]=0
+vec_ppgasp_LB[which(vec_ppgasp_LB<0)]=0
+vec_ppgasp_UB[which(vec_ppgasp_UB<0)]=0
+
+mse(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_mean)
+pci(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_LB, vec_ppgasp_UB)
+lci(vec_ppgasp_LB, vec_ppgasp_UB)
+
+
+```
+```{r diff_ordering}
+# try different orderings on simulated and real datasets
+temp = generate_data(n=1500, p =5, k=10, gamma_range = c(0.1, 2), sigma2_range = c(0.1, 1),nugget_range = c(0.1, 2))
+Xo = temp[[1]]
+Yo = temp[[2]]
+m = 50
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+middleout_order <- GpGp::order_middleout(Xo)
+coor_sum_order <- GpGp::order_coordinate(Xo)
+random_order <- sample(seq(1500), 1500, replace = FALSE)
+
+time_list = c()
+mse_list = c()
+pci_list = c()
+lci_list = c()
+
+for (i in list(maxmin_order, middleout_order, coor_sum_order, random_order)){
+  ordered_sample <- Xo[i,]
+  ordered_response <- Yo[i,]
+  X_train_ordered <- ordered_sample[1:1000,]
+  X_test_ordered <- ordered_sample[1001:1500,]
+  Y_train_ordered <- ordered_response[1:1000,]
+  Y_test_ordered <- ordered_response[1001:1500,]
+  
+  set.seed(2001)
+  nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+  nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+  gamma = runif(n = 5, min = 0.1, max = 2)
+  nu = runif(n = 1, min = 0.1, max = 2)
+  
+  start_time = Sys.time()
+  res = optim(par = c(gamma,nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, kernel_type = "pow_exp", y = Y_train_ordered, alpha = 1.9, method = "L-BFGS-B")
+  end_time = Sys.time()
+  time_list = c(time_list, as.numeric(end_time - start_time))
+  
+  list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "pow_exp", alpha = 1.9, q = qnorm(0.975, 0, 1))
+  
+  mse_i = mse(Y_test_ordered, list[[1]])
+  pci_i = pci(Y_test_ordered, list[[2]], list[[3]])
+  lci_i = lci(list[[2]], list[[3]])
+  mse_list = c(mse_list, mse_i)
+  pci_list = c(pci_list, pci_i)
+  lci_list = c(lci_list, lci_i)
+}
+
+
+time_list
+mse_list
+pci_list
+lci_list
+??ppgasp
+```
+
+```{r}
+#TODO: new find order function
+#TODO: add mean function
+#TODO: (Matern_5_2 deriv is a littl bit off)
+#TODO: add illustration of different ordering
+#TODO: try different ordering and compare the resutls. 
+sourceCpp("src/demo.cpp")
+Xo = randomLHS(n = 2, k = 5)
+x1 = matrix(Xo[1,], nrow = 1)
+x2 = matrix(Xo[2,], nrow = 1)
+gamma = runif(5)
+Matern_3_2_Sep(x1, x2, gamma = gamma, nu = 1, alpha = 1.9)
+
+?GpGp::order_middleout
+?RobustGaSP::ppgasp()
+```
+
+```{r}
+# sin function to test scalability
+n = 10e4
+k = 100
+set.seed(2001)
+# Create input domain
+x <- seq(0, 2 * pi, length.out = 200)
+
+# Initialize matrix to hold functions
+sine_functions <- matrix(0, nrow = 100, ncol = length(x))
+
+# Generate 100 sine curves with variation
+for (i in 1:100) {
+  amplitude <- runif(1, 0.5, 1.5)
+  frequency <- runif(1, 0.8, 1.2)
+  phase <- runif(1, 0, 2 * pi)
+  sine_functions[i, ] <- amplitude * sin(frequency * x + phase)
+}
+
+# Plot a subset (e.g. 20) for visualization
+matplot(x, t(sine_functions[1:20, ]), type = "l", lty = 1, col = rainbow(20),
+        xlab = "x", ylab = "f(x)", main = "Sample of 100 Sine Functions")
+RobustGaSP::
+```
+
+
+
+
+
+
