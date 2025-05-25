@@ -77,10 +77,8 @@ MatrixXd Matern_3_2_Sep(const MatrixXd &x1, const MatrixXd &x2,
   if (n1 == n2){
     // when i element is only conditioned on one element we should not add nu. 
     if (n1 == 1 && x1 != x2){
-      Rcpp::Rcout << "Not the same" << std::endl;
       return covmat;
     }
-    Rcpp::Rcout << "the same" << std::endl;
     covmat += MatrixXd::Identity(n1, n1) * nu;
     return covmat;
   } else {
@@ -172,13 +170,14 @@ MatrixXd Matern_3_2_Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2,
   }
   MatrixXd res(n1,n2);
   // first construct the correlation matrix
-  MatrixXd covmat = Exp2Sep(x1, x2, gamma, nu, alpha);
+  MatrixXd covmat = Matern_3_2_Sep(x1, x2, gamma, nu, alpha);
   // for each gamma k, calculate the matrix derivative
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double extra = alpha * 
-        pow(gamma(k), - alpha - 1) * pow(abs(x1(i,k)-x2(j,k)), alpha);
-      res(i, j) = covmat(i,j) * extra;
+      double d = abs(x1(i,k)-x2(j,k));
+      double temp1 = 1 + sqrt(3) * d / gamma(k);
+      double temp2 = 3 * pow(d, 2) / pow(gamma(k), 3);
+      res(i, j) = covmat(i,j) * temp2 / temp1;
     }
   }
   return res;
@@ -200,13 +199,14 @@ MatrixXd Matern_5_2_Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2,
   }
   MatrixXd res(n1,n2);
   // first construct the correlation matrix
-  MatrixXd covmat = Exp2Sep(x1, x2, gamma, nu, alpha);
+  MatrixXd covmat = Matern_5_2_Sep(x1, x2, gamma, nu, alpha);
   // for each gamma k, calculate the matrix derivative
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double extra = alpha * 
-        pow(gamma(k), - alpha - 1) * pow(abs(x1(i,k)-x2(j,k)), alpha);
-      res(i, j) = covmat(i,j) * extra;
+      double d = abs(x1(i,k)-x2(j,k));
+      double temp1 = 1 + sqrt(5) * d / gamma(k) + 5 * pow(d,2)/(3*pow(gamma(k), 2));
+      double temp2 = 5 * sqrt(5) * pow(d, 3) / (3 * pow(gamma(k), 4)) + 5 * pow(d, 2)/ (3 * pow(gamma(k), 3));
+      res(i, j) = covmat(i,j) * temp2 / temp1;
     }
   }
   return res;
@@ -332,7 +332,8 @@ Rcpp::List Umatrix(const MatrixXd &x, const MatrixXd &NNmatrix,
 //[[Rcpp::export]]
 double neg_vecchia_marginal_log_likelihood(const VectorXd params, double nu, const bool nugget_est, 
                                            const MatrixXd &x, const MatrixXd &NNmatrix, const MatrixXd &y,
-                                           const String kernel_type, const double alpha){
+                                           const MatrixXd trend, const String kernel_type, 
+                                           const double alpha, const String zero_mean = "Yes"){
   // y is a nxk matrix
   int k = y.cols();
   int n = y.rows();
@@ -344,17 +345,34 @@ double neg_vecchia_marginal_log_likelihood(const VectorXd params, double nu, con
   } else{
     gamma = params;
   }
-  
   List temp = Umatrix(x, NNmatrix, gamma, nu, kernel_type, alpha);
   MatrixXd U = temp[0];
-  double sum_log_diag_U = temp[1];
   MatrixXd UUt = U * U.transpose();
-  double res = 0;
-  for (int i = 0; i < k; ++i){
-    res += log(y.col(i).transpose() * UUt * y.col(i));
+  double res = 0.0;
+  double sum_log_diag_U = temp[1];
+  if (zero_mean == "Yes"){
+    for (int i = 0; i < k; ++i){
+      res += log(y.col(i).transpose() * UUt * y.col(i));
+    }
+    res *= -n / 2.0;
+    res += k * sum_log_diag_U;
+  } else{
+    int q = trend.cols();
+    MatrixXd H = trend;
+    MatrixXd N = H.transpose() * UUt * H;
+    LLT<MatrixXd> llt(N);
+    MatrixXd N_inv_H_t = llt.solve(H.transpose());
+    MatrixXd Q = UUt * (MatrixXd::Identity(n,n) - H * N_inv_H_t * UUt);
+    MatrixXd L = llt.matrixL();
+    double N_log_det = L.diagonal().array().log().matrix().sum();
+    for (int i = 0; i < k; ++i) {
+      res += log(y.col(i).transpose() * Q * y.col(i));
+    }
+    // delete by 2.0 but not 2
+    res *= -(n-q)/2.0;
+    res += k * sum_log_diag_U;
+    res -= k * N_log_det;
   }
-  res *= -n / 2;
-  res += k * sum_log_diag_U;
   return -res;
 }
 
@@ -362,15 +380,18 @@ double neg_vecchia_marginal_log_likelihood(const VectorXd params, double nu, con
 // [[Rcpp::export]]
 VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double nu, const bool nugget_est,
                                                    const MatrixXd &x, const MatrixXd &NNmatrix,
-                                                   const String kernel_type,
-                                                   const MatrixXd &y, const double alpha){
+                                                   const MatrixXd &y, const MatrixXd &trend,
+                                                   const String kernel_type, const double alpha, 
+                                                   const String zero_mean = "No"){
   // if nugget_est = TRUE, params should contain gamma and nu, and use the nu in params
   // if nuggest_est = FALSE, params should contain only gamma, and use the nu as given.
   // y is n * k 
   
+  //TODO: add mean
   int k = y.cols();
   int n = y.rows();
   int m = NNmatrix.cols() - 1;
+  MatrixXd H = trend;
   MatrixXd U = MatrixXd::Zero(n,n);
   std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double)> kernel_func;
   std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double, int)> kernel_func_deriv_gamma_k;
@@ -395,11 +416,13 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     VectorXd grad = VectorXd::Zero(p+1);
     VectorXd sum_log_deriv = VectorXd::Zero(p+1);
     
+    // a list of matrix to store dU/dgamma_k and dU/dnu 
     std::vector<MatrixXd> matrix_list(p+1, MatrixXd::Zero(n, n));
     // first set the (1,1) element of dU/dnu
     matrix_list[p](0,0) = -0.5 * pow(kernel_func(x.row(0), x.row(0), gamma, nu, alpha)(0,0), -3/2);
     // the (1,1) element of du/dgamma is 0
     
+    sum_log_deriv(p) -= 0.5 * 1/kernel_func(x.row(0), x.row(0), gamma, nu, alpha)(0,0);
     // deal with i = 0 case separately since there is no neighbor
     for (int i = 1; i < n; ++i){
       MatrixXd selected_neighbors;
@@ -468,7 +491,7 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
         // the top left term of dU/dgamma is 0 so we don't need to calculate it separately
       }
       
-      double W = 1 + (B_i * B_i.transpose())(0,0);
+      double W = 1.0 + (B_i * B_i.transpose())(0,0);
       sum_log_deriv(p) -= 0.5 * pow(D_i_half_inv,2) * W;
       double diag_nu = -0.5 * pow(D_i_half_inv, 3) * W;
       MatrixXd off_diag_nu = -diag_nu * B_i + D_i_half_inv * R_inv_y(Sigma_cc, B_i.transpose()).transpose();
@@ -479,16 +502,40 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       VectorXd ucol = Ucolumn(i_column, idx, i, n);
       matrix_list[p].col(i) = ucol;
     }
-    // finish the gradient of gamma and nu
+    
     MatrixXd Ut = U.transpose();
     MatrixXd UUt = U*Ut;
-    // here rewrite the for loop to make it faster.
-    for (int j = 0; j < p+1; ++j){
-      grad(j) -= k * sum_log_deriv(j);
-      for (int z = 0; z < k; ++z) {
-        MatrixXd temp3 =  y.col(z).transpose() * UUt * y.col(z);
-        MatrixXd temp4 = y.col(z).transpose() * matrix_list[j] * Ut * y.col(z);
-        grad(j) += n * 1/temp3(0,0) * temp4(0,0);
+    if (zero_mean == "Yes"){
+      // here rewrite the for loop to make it faster.
+      for (int j = 0; j < p+1; ++j){
+        grad(j) -= k * sum_log_deriv(j);
+        for (int z = 0; z < k; ++z) {
+          MatrixXd temp3 =  y.col(z).transpose() * UUt * y.col(z);
+          MatrixXd temp4 = y.col(z).transpose() * matrix_list[j] * Ut * y.col(z);
+          grad(j) += n * 1/temp3(0,0) * temp4(0,0);
+          if (j == 2){
+            Rcpp::Rcout << 1/temp3(0,0) * temp4(0,0) << std::endl;
+          }
+        }
+      }
+    } else{
+      int q = y.cols();
+      MatrixXd Ht = H.transpose();
+      MatrixXd N = Ht * UUt * H;
+      LLT<MatrixXd> llt(N);
+      MatrixXd N_inv = llt.solve(MatrixXd::Identity(q, q));
+      MatrixXd temp3 = H * N_inv * Ht;
+      MatrixXd temp4 = MatrixXd::Identity(n,n) - temp3 * UUt;
+      MatrixXd Q = UUt * temp4;
+      MatrixXd temp5 = H * N * Ht;
+      for (int j = 0; j < p+1; ++j){
+        MatrixXd M = matrix_list[j] * Ut;
+        MatrixXd dQ = M * temp4 + UUt * (temp3 * M - temp5 * M * temp5 * UUt);
+        for (int z = 0; z < k; ++z) {
+          MatrixXd temp6 = y.col(z).transpose() * Q * y.col(z);
+          MatrixXd temp7 = y.col(z).transpose() * dQ * y.col(z);
+          grad(j) += (n-q) * 1/temp6(0,0) * temp7(0,0);
+        }
       }
     }
     return grad;
@@ -701,7 +748,7 @@ Eigen::MatrixXd separable_multi_kernel (List R0, const Eigen::VectorXd  & beta,c
 }
 
 // [[Rcpp::export]]
-List log_marginal_lik_ppgasp(const Eigen::VectorXd &  param,double nugget, 
+double log_marginal_lik_ppgasp(const Eigen::VectorXd &  param,double nugget, 
                                const bool nugget_est, const List R0, 
                                const Eigen::MatrixXd & X,
                                const String zero_mean,
@@ -726,7 +773,6 @@ List log_marginal_lik_ppgasp(const Eigen::VectorXd &  param,double nugget,
   
   LLT<MatrixXd> lltOfR(R);             // compute the cholesky decomposition of R called lltofR
   MatrixXd L = lltOfR.matrixL();   //retrieve factor L  in the decomposition
-  
   if(zero_mean=="Yes"){
     
     MatrixXd yt_R_inv= (L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(output))).transpose(); 
@@ -741,7 +787,7 @@ List log_marginal_lik_ppgasp(const Eigen::VectorXd &  param,double nugget,
     
     //double log_S_2=log(S_2);
     
-    return Rcpp::List::create(-k*(L.diagonal().array().log().matrix().sum())-(num_obs)/2.0*log_S_2, R);
+    return -k*(L.diagonal().array().log().matrix().sum())-(num_obs)/2.0*log_S_2;
     
   }else{
     
@@ -764,17 +810,98 @@ List log_marginal_lik_ppgasp(const Eigen::VectorXd &  param,double nugget,
       log_S_2=log_S_2+log((yt_R_inv.row(loc_i)*output.col(loc_i))(0,0)-(output.col(loc_i).transpose()*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output.col(loc_i))(0,0));
     }
     
-    
+    MatrixXd R_inv = lltOfR.solve(MatrixXd::Identity(R.rows(), R.cols()));
     // double log_S_2=log(S_2);
-    
+    MatrixXd Q = R_inv -  R_inv_X_Xt_R_inv_X_inv_Xt_R_inv;
     //MatrixXd S_2= (yt_R_inv*output-output.transpose()*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output);
     //double log_S_2=log(S_2(0,0));
-    return Rcpp::List::create(-k*(L.diagonal().array().log().matrix().sum())-k*(LX.diagonal().array().log().matrix().sum())-(num_obs-q)/2.0*log_S_2, R);
+    return (-k*(L.diagonal().array().log().matrix().sum())-k*(LX.diagonal().array().log().matrix().sum())-(num_obs-q)/2.0*log_S_2);
   }
 }
 
 // [[Rcpp::export]]
-Eigen::MatrixXd pow_exp_deriv(const MatrixXd & R0_i,  const Eigen::MatrixXd & R, const double beta_i, const double alpha_i){
+Eigen::MatrixXd pow_exp_deriv(const MatrixXd & R0_i, const Eigen::MatrixXd & R, const double beta_i, const double alpha_i){
   return  -(R.array()*(R0_i.array().pow(alpha_i))).matrix()*alpha_i*pow(beta_i,alpha_i-1);
+}
+
+// [[Rcpp::export]]
+Eigen::VectorXd log_marginal_lik_deriv_ppgasp(const VectorXd & param,
+                                              double nugget,  
+                                              bool nugget_est, 
+                                              const List R0, 
+                                              const MatrixXd& X,
+                                              const String zero_mean,
+                                              const MatrixXd & output, 
+                                              const VectorXi & kernel_type,
+                                              const VectorXd & alpha){
+  
+  VectorXd beta;
+  double nu=nugget;
+  int k=output.cols();
+  int param_size=param.size();
+  if(nugget_est==false){//not sure about the logical stuff
+    beta= param.array().exp().matrix();
+  }else{
+    beta=param.head(param_size-1).array().exp().matrix(); 
+    nu=exp(param[param_size-1]); //nugget
+  }
+  int p=beta.size();
+  int num_obs=output.rows();
+  MatrixXd R= separable_multi_kernel(R0,beta,kernel_type,alpha);
+  MatrixXd R_ori=  R;  // this is the one without the nugget
+  
+  R=R+nu*MatrixXd::Identity(num_obs,num_obs);  //not sure 
+  
+  LLT<MatrixXd> lltOfR(R);
+  MatrixXd L = lltOfR.matrixL();
+  VectorXd ans=VectorXd::Ones(param_size);
+  
+  //String kernel_type_ti;
+  
+  if(zero_mean=="Yes"){
+    MatrixXd yt_R_inv= (L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(output))).transpose(); 
+    //MatrixXd S_2= (yt_R_inv*output);
+    
+    //double log_S_2=log(S_2(0,0));
+    VectorXd S_2_vec=VectorXd::Zero(k);
+    
+    for(int loc_i=0;loc_i<k;loc_i++){
+      S_2_vec[loc_i]=(yt_R_inv.row(loc_i)*output.col(loc_i))(0,0);
+      
+    }
+    MatrixXd dev_R_i;
+    MatrixXd Vb_ti;
+    //allow different choices of kernels
+    for(int ti=0;ti<p;ti++){
+      if(kernel_type[ti]==1){
+        dev_R_i=pow_exp_deriv( R0[ti],R_ori,beta[ti],alpha[ti]);   //now here I have R_ori instead of R
+      }
+      Vb_ti=L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(dev_R_i));
+      
+      
+      double ratio=0;
+      
+      for(int loc_i=0;loc_i<k;loc_i++){
+        ratio=ratio+((output.col(loc_i).transpose()*Vb_ti*(yt_R_inv.transpose()).col(loc_i) )(0,0))/S_2_vec[loc_i];
+      }
+      ans[ti]=-0.5*k*Vb_ti.diagonal().sum()+num_obs/2.0*ratio;
+      
+      //ans[ti]=-0.5*Vb_ti.diagonal().sum()+(num_obs/2.0*output.transpose()*Vb_ti*yt_R_inv.transpose()/ S_2(0,0))(0,0) ;  
+    }
+    //the last one if the nugget exists
+    if(nugget_est){
+      dev_R_i=MatrixXd::Identity(num_obs,num_obs);
+      Vb_ti=L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(dev_R_i));
+      
+      double ratio=0;
+      for(int loc_i=0;loc_i<k;loc_i++){
+        ratio=ratio+((output.col(loc_i).transpose()*Vb_ti*(yt_R_inv.transpose()).col(loc_i))(0,0))/S_2_vec[loc_i];
+        Rcpp::Rcout << ((output.col(loc_i).transpose()*Vb_ti*(yt_R_inv.transpose()).col(loc_i))(0,0))/S_2_vec[loc_i] << std::endl;
+      }
+      ans[p]=-0.5*k*Vb_ti.diagonal().sum()+num_obs/2.0*ratio;
+      //ans[p]=-0.5*Vb_ti.diagonal().sum()+(num_obs/2.0*output.transpose()*Vb_ti*yt_R_inv.transpose()/ S_2(0,0))(0,0); 
+    }
+  }
+  return ans;
 }
 
