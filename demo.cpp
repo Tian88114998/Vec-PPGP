@@ -18,21 +18,18 @@ MatrixXd Exp2Sep(const MatrixXd &x1, const MatrixXd &x2,
   // the output is the correlation matrix
   int n1 = x1.rows();
   int n2 = x2.rows();
+  int p = x1.cols();
   if (x1.cols() != x2.cols()){
     stop("dimension of x1 does not match with dimension of x2");
   }
-  int p = x1.cols();
   if (gamma.size() != p){
     stop("length of gamma does not match dimension of x");
   }
   MatrixXd covmat(n1, n2);
+  VectorXd inv_gamma = gamma.array().inverse().pow(alpha);
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double r = 0.0;
-      for (int k = 0; k < p; k++){
-        // change to squared value instead of absolute value
-        r += pow((std::abs(x1(i, k) - x2(j, k)) / gamma(k)), alpha);
-      }
+      double r = ((x1.row(i) - x2.row(j)).array().abs().pow(alpha) * inv_gamma.transpose().array()).sum();
       covmat(i, j) = exp(-r);
     }
   }
@@ -147,8 +144,9 @@ MatrixXd Exp2Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2,
   // for each gamma k, calculate the matrix derivative
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
+      double d = abs(x1(i,k)-x2(j,k));
       double extra = alpha * 
-        pow(gamma(k), - alpha - 1) * pow(abs(x1(i,k)-x2(j,k)), alpha);
+        pow(gamma(k), - alpha - 1) * pow(d, alpha);
        res(i, j) = covmat(i,j) * extra;
      }
   }
@@ -286,8 +284,6 @@ VectorXd Ucolumn(const VectorXd &i_column, const VectorXd &idx, const int &i,
 Rcpp::List Umatrix(const MatrixXd &x, const MatrixXd &NNmatrix, 
                  const VectorXd gamma, const double nu, const string kernel_type,
                      const double alpha) {
-  using namespace std::chrono;
-  auto start = high_resolution_clock::now();
   int n = x.rows();
   // the first column of the NNmatrix is not useful
   int m = NNmatrix.cols() - 1;
@@ -329,20 +325,16 @@ Rcpp::List Umatrix(const MatrixXd &x, const MatrixXd &NNmatrix,
       sum_log_diag_U += log(diag);
     }
   }
-  auto end = high_resolution_clock::now();
-  duration<double> diff = end - start;
-  Rcpp::Rcout << "Timed section took " << diff.count() << " seconds.\n";
   return Rcpp::List::create(U, sum_log_diag_U);
 }
 
 using KernelFunc = std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double)>;
+using KernelFunc_deriv = std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double, int)>;
 
 // [[Rcpp::export]]
 Rcpp::List Umatrix1(const MatrixXd &x, const MatrixXd &NNmatrix, 
-                   const VectorXd gamma, const double nu, const string kernel_type,
-                   const double alpha) {
-  using namespace std::chrono;
-  auto start = high_resolution_clock::now();
+                    const VectorXd gamma, const double nu, const string kernel_type,
+                    const double alpha) {
   int n = x.rows();
   int m = NNmatrix.cols() - 1;
   MatrixXd U = MatrixXd::Zero(n, n);
@@ -367,7 +359,7 @@ Rcpp::List Umatrix1(const MatrixXd &x, const MatrixXd &NNmatrix,
   
   for (int i = 1; i < n; ++i) {
     int num_neighbors = std::min(i, m);
-    VectorXi idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose().cast<int>();
+    VectorXd idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose();
     
     MatrixXd selected_neighbors(num_neighbors, x.cols());
     for (int j = 0; j < num_neighbors; ++j){
@@ -388,14 +380,11 @@ Rcpp::List Umatrix1(const MatrixXd &x, const MatrixXd &NNmatrix,
     // Fast Ucol insert
     U(i, i) = D_i_half_inv;
     for (int j = 0; j < num_neighbors; ++j) {
-      U(idx[j] - 1, i) = i_column[j];
+      U(static_cast<int>(idx[j]) - 1, i) = i_column[j];
     }
     
     sum_log_diag_U += std::log(D_i_half_inv);
   }
-  auto end = high_resolution_clock::now();
-  duration<double> diff = end - start;
-  Rcpp::Rcout << "Timed section took " << diff.count() << " seconds.\n";
   return Rcpp::List::create(U, sum_log_diag_U);
 }
 
@@ -444,6 +433,8 @@ double neg_vecchia_marginal_log_likelihood(const VectorXd params, double nu, con
     res += k * sum_log_diag_U;
     res -= k * N_log_det;
   }
+  Rcpp::Rcout << "params" << std::endl;
+  Rcpp::Rcout << params << std::endl;
   return -res;
 }
 
@@ -458,15 +449,14 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
   // if nuggest_est = FALSE, params should contain only gamma, and use the nu as given.
   // y is n * k 
   using namespace std::chrono;
-  auto start = high_resolution_clock::now();
   
   int k = y.cols();
   int n = y.rows();
   int m = NNmatrix.cols() - 1;
   MatrixXd H = trend;
   MatrixXd U = MatrixXd::Zero(n,n);
-  std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double)> kernel_func;
-  std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double, int)> kernel_func_deriv_gamma_k;
+  KernelFunc kernel_func;
+  KernelFunc_deriv kernel_func_deriv_gamma_k;
   if (kernel_type == "pow_exp"){
     kernel_func = Exp2Sep;
     kernel_func_deriv_gamma_k = Exp2Sep_deriv_gamma_k;
@@ -480,6 +470,7 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     Rcpp::stop("Unknown kernel type.");
   }
   if (nugget_est){
+    auto start = high_resolution_clock::now();
     int p = params.size()-1;
     VectorXd gamma = params.head(p);
     nu = params(p);
@@ -497,54 +488,44 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     sum_log_deriv(p) -= 0.5 * 1/kernel_func(x.row(0), x.row(0), gamma, nu, alpha)(0,0);
     // deal with i = 0 case separately since there is no neighbor
     for (int i = 1; i < n; ++i){
-      MatrixXd selected_neighbors;
-      VectorXd idx;
-      if (i < m) {
-        idx = NNmatrix.block(i, 1, 1, i).transpose();
-        selected_neighbors.resize(i, x.cols());
-        // select the neighbors of i according to the idx set for later use
-        for (int j = 0; j < i; ++j){
-          selected_neighbors.row(j) = x.row(idx[j] - 1);
-        }
-        // also calculate the Umatrix
-        List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha);
-        VectorXd icolumn = temp[0];
-        VectorXd ucol = Ucolumn(icolumn, idx, i, n);
-        U.col(i) = ucol;
-      } else{
-        idx = NNmatrix.row(i).segment(1, m);
-        selected_neighbors.resize(m, x.cols());
-        // select the neighbors of i according to the idx set
-        for (int j = 0; j < m; ++j){
-          selected_neighbors.row(j) = x.row(idx[j] - 1);
-        }
-        List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha);
-        VectorXd icolumn = temp[0];
-        VectorXd ucol = Ucolumn(icolumn, idx, i, n);
-        U.col(i) = ucol;
+      int num_neighbors = std::min(i,m);
+      VectorXd idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose();
+      MatrixXd selected_neighbors(num_neighbors, x.cols());
+      for (int j = 0; j < num_neighbors; ++j){
+        selected_neighbors.row(j) = x.row(idx[j] - 1);
       }
       
       // first calculate the gradient of gamma
       MatrixXd i_element = x.row(i);
       MatrixXd Sigma_cc = kernel_func(selected_neighbors, selected_neighbors, gamma, nu, alpha);
       MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu, alpha);
-      MatrixXd B_i = R_inv_y(Sigma_cc, Sigma_ci).transpose();
+      MatrixXd B_i_t = R_inv_y(Sigma_cc, Sigma_ci);
+      MatrixXd B_i = B_i_t.transpose();
       MatrixXd D_i = kernel_func(i_element, i_element, gamma, nu,
                              alpha) - B_i * Sigma_ci;
       // this is 1/sigma
       double D_i_half_inv = 1/sqrt(D_i(0,0));
+      double D_i_half_inv2 = D_i_half_inv * D_i_half_inv;
+      double D_i_half_inv3 = D_i_half_inv2 * D_i_half_inv;
       
+      U(i, i) = D_i_half_inv;
       
+      // construct the dU matrix
+      VectorXd i_column(num_neighbors + 1);
+      i_column.head(num_neighbors) = -D_i_half_inv * B_i;
+      i_column(num_neighbors) = D_i_half_inv;
+      for (int j = 0; j < num_neighbors; ++j) {
+        U(static_cast<int>(idx[j]) - 1, i) = i_column[j];
+      }
       for (int j = 0; j < p; ++j){
         MatrixXd Sigma_ci_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, i_element, gamma, nu, alpha, j);
         MatrixXd Sigma_cc_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, selected_neighbors, gamma, nu, alpha, j);
-        MatrixXd temp1 = Sigma_ci_deriv_gamma_j.transpose() * B_i.transpose() - B_i * Sigma_cc_deriv_gamma_j * B_i.transpose() + 
-          B_i * Sigma_ci_deriv_gamma_j;
-        double A_j = temp1(0,0);
+        double Sigma_ci_deriv_B_i_t = (Sigma_ci_deriv_gamma_j.transpose() * B_i_t)(0,0);
+        double A_j = 2 * Sigma_ci_deriv_B_i_t - (B_i * (Sigma_cc_deriv_gamma_j * B_i_t))(0,0);
         // this finishes the first part
-        sum_log_deriv(j) += 0.5 * pow(D_i_half_inv, 2) * A_j;
+        sum_log_deriv(j) += 0.5 * D_i_half_inv2 * A_j;
         // the second part we need to dU/dgamma
-        double diag_j = 0.5 * pow(D_i_half_inv, 3) * A_j;
+        double diag_j = 0.5 * D_i_half_inv3 * A_j;
         // see the notes for these computations
         MatrixXd Sigma_ic_deriv_Sigma_cc_inv = R_inv_y(Sigma_cc, Sigma_ci_deriv_gamma_j).transpose();
         MatrixXd temp2 = B_i * Sigma_cc_deriv_gamma_j;
@@ -563,59 +544,88 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
         // the top left term of dU/dgamma is 0 so we don't need to calculate it separately
       }
       
-      double W = 1.0 + (B_i * B_i.transpose())(0,0);
-      sum_log_deriv(p) -= 0.5 * pow(D_i_half_inv,2) * W;
-      double diag_nu = -0.5 * pow(D_i_half_inv, 3) * W;
+      double B_i_squared = B_i.row(0).squaredNorm();
+      double W = 1.0 + B_i_squared;
+      
+      sum_log_deriv(p) -= 0.5 * D_i_half_inv2 * W;
+      double diag_nu = -0.5 * D_i_half_inv3 * W;
       MatrixXd off_diag_nu = -diag_nu * B_i + D_i_half_inv * R_inv_y(Sigma_cc, B_i.transpose()).transpose();
       // get the i_column of dU/dnu
-      VectorXd i_column(off_diag_nu.cols() + 1);
+      i_column(off_diag_nu.cols() + 1);
       i_column.head(off_diag_nu.cols()) = off_diag_nu;
       i_column(off_diag_nu.cols()) = diag_nu;
       VectorXd ucol = Ucolumn(i_column, idx, i, n);
       matrix_list[p].col(i) = ucol;
     }
-    
-    MatrixXd Ut = U.transpose();
-    MatrixXd UUt = U*Ut;
     if (zero_mean == "Yes"){
-      // here rewrite the for loop to make it faster.
+      MatrixXd Ut = U.transpose();
       for (int j = 0; j < p+1; ++j){
         grad(j) -= k * sum_log_deriv(j);
-        for (int z = 0; z < k; ++z) {
-          MatrixXd temp3 =  y.col(z).transpose() * UUt * y.col(z);
-          MatrixXd temp4 = y.col(z).transpose() * matrix_list[j] * Ut  * y.col(z);
-          grad(j) += n * 1/temp3(0,0) * temp4(0,0);
+      }
+      for (int z = 0; z < k; ++z){
+        VectorXd y_z = y.col(z);
+        VectorXd Ut_y_z = Ut * y_z;
+        VectorXd UUt_y_z = U * Ut_y_z;
+        double temp3 =  y_z.dot(UUt_y_z);
+        for (int j = 0; j < p+1; ++j){
+          double temp4 = y_z.dot(matrix_list[j] * Ut_y_z);
+          grad(j) += n * 1/temp3 * temp4;
         }
       }
     } else{
-      int q = y.cols();
+      int q = H.cols();
+      MatrixXd Ut = U.transpose();
+      MatrixXd UtH = Ut*H;
+      MatrixXd UUtH = U * UtH;
       MatrixXd Ht = H.transpose();
-      MatrixXd N = Ht * UUt * H;
+      MatrixXd N = Ht * UUtH;
       LLT<MatrixXd> llt(N);
       MatrixXd N_inv = llt.solve(MatrixXd::Identity(q, q));
+      MatrixXd N_inv_Ht = N_inv * Ht;
       MatrixXd H_N_inv_Ht = H * N_inv * Ht;
-      MatrixXd Q1 = MatrixXd::Identity(n,n) - H_N_inv_Ht * UUt;
-      MatrixXd Q = UUt * Q1;
-      MatrixXd H_N_Ht = H * N * Ht;
+      
       for (int j = 0; j < p+1; ++j){
-        MatrixXd M = matrix_list[j] * Ut;
-        MatrixXd dQ = M * Q1 + UUt * (H_N_inv_Ht * M * H_N_inv_Ht * UUt - H_N_inv_Ht * M);
         grad(j) -= k * sum_log_deriv(j);
-        grad(j) += k * (N_inv * Ht * M * H).diagonal().sum();
-        for (int z = 0; z < k; ++z) {
-          MatrixXd temp6 = y.col(z).transpose() * Q * y.col(z);
-          MatrixXd temp7 = y.col(z).transpose() * dQ * y.col(z);
-          grad(j) += (n-q) * 1/temp6(0,0) * temp7(0,0);
+        MatrixXd MH = matrix_list[j] * UtH;
+        MatrixXd HtMH = Ht * MH;
+        grad(j) += k * (N_inv * HtMH).diagonal().sum();
+      }
+      for (int z = 0; z < k; ++z){
+        VectorXd y_z = y.col(z);
+        MatrixXd Ut_y_z = Ut * y_z;
+        MatrixXd UUt_y_z = U * Ut_y_z;
+        // Q1 = Ut_H_N_inv_Ht_UUt_y_z
+        MatrixXd Q1 = Ut * (H_N_inv_Ht * UUt_y_z);
+        VectorXd Qy_z = UUt_y_z - U * Q1;
+        double temp5 = y_z.dot(Qy_z);
+        for (int j = 0; j < p+1; ++j){
+          MatrixXd first_term = matrix_list[j] * Ut_y_z;
+          MatrixXd second_term = matrix_list[j] * Q1;
+          MatrixXd third_term = U * (Ut * (H_N_inv_Ht * second_term));
+          MatrixXd fourth_term = U * (Ut * (H_N_inv_Ht * first_term));
+          VectorXd Qj_y_z = first_term - second_term + third_term - fourth_term;
+          double temp6 = y_z.dot(Qj_y_z);
+          grad(j) += (n-q) * 1/temp5 * temp6;
         }
       }
     }
-    Rcpp::Rcout << "grad" << std::endl;
-    Rcpp::Rcout << grad << std::endl;
+    // clip the gradient
+    VectorXd grad_clip(p+1);
+    for (int j = 0; j < p+1; ++j){
+      if (std::abs(grad(j)) > 1e5) {
+        grad_clip(j) = std::copysign(1e5, grad(j));
+      } else{
+        grad_clip(j) = grad(j);
+      }
+    }
+    Rcpp::Rcout << "grad_clip" << std::endl;
+    Rcpp::Rcout << grad_clip << std::endl;
     auto end = high_resolution_clock::now();
     duration<double> diff = end - start;
-    Rcpp::Rcout << "Timed section took " << diff.count() << " seconds.\n";
-    return grad;
+    Rcpp::Rcout << "Deriv with nugget section took " << diff.count() << " seconds.\n";
+    return grad_clip;
   } else{
+    auto start = high_resolution_clock::now();
     int p = params.size();
     VectorXd gamma = params;
     U(0,0) = 1/sqrt(kernel_func(x.row(0),x.row(0), gamma, nu, alpha)(0,0));
@@ -626,54 +636,45 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     
     // deal with i = 0 case separately since there is no neighbor
     for (int i = 1; i < n; ++i){
-      MatrixXd selected_neighbors;
-      VectorXd idx;
-      if (i < m) {
-        idx = NNmatrix.block(i, 1, 1, i).transpose();
-        selected_neighbors.resize(i, x.cols());
-        // select the neighbors of i according to the idx set for later use
-        for (int j = 0; j < i; ++j){
-          selected_neighbors.row(j) = x.row(idx[j] - 1);
-        }
-        // also calculate the Umatrix
-        List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha);
-        VectorXd icolumn = temp[0];
-        VectorXd ucol = Ucolumn(icolumn, idx, i, n);
-        U.col(i) = ucol;
-      } else{
-        idx = NNmatrix.row(i).segment(1, m);
-        selected_neighbors.resize(m, x.cols());
-        // select the neighbors of i according to the idx set
-        for (int j = 0; j < m; ++j){
-          selected_neighbors.row(j) = x.row(idx[j] - 1);
-        }
-        List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha);
-        VectorXd icolumn = temp[0];
-        VectorXd ucol = Ucolumn(icolumn, idx, i, n);
-        U.col(i) = ucol;
+      int num_neighbors = std::min(i,m);
+      VectorXd idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose();
+      MatrixXd selected_neighbors(num_neighbors, x.cols());
+      for (int j = 0; j < num_neighbors; ++j){
+        selected_neighbors.row(j) = x.row(idx[j] - 1);
       }
       
       // first calculate the gradient of gamma
       MatrixXd i_element = x.row(i);
       MatrixXd Sigma_cc = kernel_func(selected_neighbors, selected_neighbors, gamma, nu, alpha);
       MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu, alpha);
-      MatrixXd B_i = R_inv_y(Sigma_cc, Sigma_ci).transpose();
+      MatrixXd B_i_t = R_inv_y(Sigma_cc, Sigma_ci);
+      MatrixXd B_i = B_i_t.transpose();
       MatrixXd D_i = kernel_func(i_element, i_element, gamma, nu,
                              alpha) - B_i * Sigma_ci;
       // this is 1/sigma
       double D_i_half_inv = 1/sqrt(D_i(0,0));
+      double D_i_half_inv2 = D_i_half_inv * D_i_half_inv;
+      double D_i_half_inv3 = D_i_half_inv2 * D_i_half_inv;
       
+      U(i, i) = D_i_half_inv;
+      
+      // construct the U matrix
+      VectorXd i_column(num_neighbors + 1);
+      i_column.head(num_neighbors) = -D_i_half_inv * B_i;
+      i_column(num_neighbors) = D_i_half_inv;
+      for (int j = 0; j < num_neighbors; ++j) {
+        U(static_cast<int>(idx[j]) - 1, i) = i_column[j];
+      }
       
       for (int j = 0; j < p; ++j){
         MatrixXd Sigma_ci_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, i_element, gamma, nu, alpha, j);
         MatrixXd Sigma_cc_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, selected_neighbors, gamma, nu, alpha, j);
-        MatrixXd temp1 = Sigma_ci_deriv_gamma_j.transpose() * B_i.transpose() - B_i * Sigma_cc_deriv_gamma_j * B_i.transpose() + 
-          B_i * Sigma_ci_deriv_gamma_j;
-        double A_j = temp1(0,0);
+        double Sigma_ci_deriv_B_i_t = (Sigma_ci_deriv_gamma_j.transpose() * B_i_t)(0,0);
+        double A_j = 2* Sigma_ci_deriv_B_i_t - (B_i * Sigma_cc_deriv_gamma_j * B_i_t)(0,0);
         // this finishes the first part
-        sum_log_deriv(j) += 0.5 * pow(D_i_half_inv, 2) * A_j;
+        sum_log_deriv(j) += 0.5 * D_i_half_inv2 * A_j;
         // the second part we need to dU/dgamma
-        double diag_j = 0.5 * pow(D_i_half_inv, 3) * A_j;
+        double diag_j = 0.5 * D_i_half_inv3 * A_j;
         // see the notes for these computations
         MatrixXd Sigma_ic_deriv_Sigma_cc_inv = R_inv_y(Sigma_cc, Sigma_ci_deriv_gamma_j).transpose();
         MatrixXd temp2 = B_i * Sigma_cc_deriv_gamma_j;
@@ -692,20 +693,25 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       }
     }
     // finish the gradient of gamma
-    MatrixXd Ut = U.transpose();
-    MatrixXd UUt = U*Ut;
     if (zero_mean == "Yes"){
-      // here rewrite the for loop to make it faster.
+      MatrixXd Ut = U.transpose();
       for (int j = 0; j < p; ++j){
         grad(j) -= k * sum_log_deriv(j);
-        for (int z = 0; z < k; ++z) {
-          MatrixXd temp3 =  y.col(z).transpose() * UUt * y.col(z);
-          MatrixXd temp4 = y.col(z).transpose() * matrix_list[j] * Ut  * y.col(z);
-          grad(j) += n * 1/temp3(0,0) * temp4(0,0);
+      }
+      for (int z = 0; z < k; ++z){
+        VectorXd y_z = y.col(z);
+        VectorXd Ut_y_z = Ut * y_z;
+        VectorXd UUt_y_z = U * Ut_y_z;
+        double temp3 =  y_z.dot(UUt_y_z);
+        for (int j = 0; j < p; ++j){
+          double temp4 = y_z.dot(matrix_list[j] * Ut_y_z);
+          grad(j) += n * 1/temp3 * temp4;
         }
       }
     } else{
-      int q = y.cols();
+      MatrixXd Ut = U.transpose();
+      MatrixXd UUt = U*Ut;
+      int q = H.cols();
       MatrixXd Ht = H.transpose();
       MatrixXd N = Ht * UUt * H;
       LLT<MatrixXd> llt(N);
@@ -726,12 +732,21 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
         }
       }
     }
-    Rcpp::Rcout << "grad" << std::endl;
-    Rcpp::Rcout << grad << std::endl;
+    // clip the gradient
+    VectorXd grad_clip(p);
+    for (int j = 0; j < p; ++j){
+      if (std::abs(grad(j)) > 1e5) {
+        grad_clip(j) = std::copysign(1e5, grad(j));
+      } else{
+        grad_clip(j) = grad(j);
+      }
+    }
+    Rcpp::Rcout << "grad_clip" << std::endl;
+    Rcpp::Rcout << grad_clip << std::endl;
     auto end = high_resolution_clock::now();
     duration<double> diff = end - start;
-    Rcpp::Rcout << "Timed section took " << diff.count() << " seconds.\n";
-    return grad;
+    Rcpp::Rcout << "Deriv w/o nugget took " << diff.count() << " seconds.\n";
+    return grad_clip;
   }
 }
 
@@ -739,7 +754,7 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
 // make prediction on new points 
 List predict(const MatrixXd &x, const MatrixXd &xp, const MatrixXd &NNmatrix,
                const MatrixXd &y, const VectorXd gamma, const double nu, 
-               const String kernel_type, const double alpha, const double q, 
+               const String kernel_type, const double alpha, const double q_95, 
                const MatrixXd& trend, 
                const MatrixXd& testing_trend,
                const String zero_mean = "Yes")
@@ -773,36 +788,26 @@ List predict(const MatrixXd &x, const MatrixXd &xp, const MatrixXd &NNmatrix,
       double sigma2_j = (y_j.transpose() * UoUot * y_j)(0,0)/n;
       MatrixXd temp_mean = - Up.transpose().triangularView<Eigen::Lower>().solve(Uopt * y_j);
       pred_mean.col(j) = temp_mean;
-      MatrixXd temp_sd = q * ((sigma2_j * Sigma_ii.array())).sqrt().matrix();
+      MatrixXd temp_sd = q_95 * ((sigma2_j * Sigma_ii.array())).sqrt().matrix();
       MatrixXd temp_bound = temp_mean + temp_sd;
       upper95.col(j) = temp_bound;
       temp_bound = temp_mean - temp_sd;
       lower95.col(j) = temp_bound;
     }
   } else{
-    MatrixXd H; 
-    MatrixXd Hp;
-    if (trend.size() == 0){
-      H = MatrixXd::Ones(n, 1);
-    } else{
-      H = trend;
-    }
-    if (testing_trend.size() == 0){
-      Hp = MatrixXd::Ones(np, 1);
-    } else{
-      Hp = testing_trend;
-    }
+    MatrixXd H = trend; 
+    MatrixXd Hp = testing_trend;
     int q = H.cols();
     for (int j = 0; j < k; j++){
       MatrixXd y_j = y.col(j);
       MatrixXd temp = H.transpose() * UoUot * H;
       LLT<MatrixXd> llt(temp);
       MatrixXd temp_inv = llt.solve(MatrixXd::Identity(q, q));
-      MatrixXd theta_j = temp_inv * H.transpose() * UoUot * y_j;
-      MatrixXd temp_mean = Hp * theta_j - R_inv_y(Up.transpose(), Uopt * (y_j - H * theta_j));
+      MatrixXd theta_j = temp_inv * H.transpose() * (UoUot * y_j);
+      MatrixXd temp_mean = Hp * theta_j - Up.transpose().triangularView<Eigen::Lower>().solve(Uopt * (y_j - H * theta_j));
       pred_mean.col(j) = temp_mean;
-      double sigma2_j = ((y_j - H * theta_j).transpose() * UoUot * (y_j - H*theta_j))(0,0)/(n-q);
-      MatrixXd temp_sd = q * ((sigma2_j * Sigma_ii.array())).sqrt().matrix();
+      double sigma2_j = ((y_j- H * theta_j).transpose() * UoUot * (y_j- H* theta_j))(0,0)/(n-q);
+      MatrixXd temp_sd = q_95 * ((sigma2_j * Sigma_ii.array())).sqrt().matrix();
       upper95.col(j) = temp_mean + temp_sd;
       lower95.col(j) = temp_mean - temp_sd;
     }
@@ -811,15 +816,213 @@ List predict(const MatrixXd &x, const MatrixXd &xp, const MatrixXd &NNmatrix,
 }
 
 // [[Rcpp::export]]
-double Test_for_loop(const int n){
-  double res=0;
-  if(n>0){
-    for(int i=0; i<n;i++){
-      res=res+0.1;
+List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
+                    const MatrixXd &x, const MatrixXd &NNmatrix,
+                    const MatrixXd &y,
+                    const String kernel_type, const double alpha, 
+                    const MatrixXd &trend, const String zero_mean = "Yes"){
+  using namespace std::chrono;
+  auto start = high_resolution_clock::now();
+  int k = y.cols();
+  int n = y.rows();
+  int m = NNmatrix.cols() - 1;
+  MatrixXd H = trend;
+  KernelFunc kernel_func;
+  KernelFunc_deriv kernel_func_deriv_gamma_k;
+  if (kernel_type == "pow_exp"){
+    kernel_func = Exp2Sep;
+    kernel_func_deriv_gamma_k = Exp2Sep_deriv_gamma_k;
+  } else if (kernel_type == "matern_3_2"){
+    kernel_func = Matern_3_2_Sep;
+    kernel_func_deriv_gamma_k = Matern_3_2_Sep_deriv_gamma_k;
+  } else if (kernel_type == "matern_5_2"){
+    kernel_func = Matern_5_2_Sep;
+    kernel_func_deriv_gamma_k = Matern_5_2_Sep_deriv_gamma_k;
+  } else {
+    Rcpp::stop("Unknown kernel type.");
+  }
+  VectorXd grad;
+  MatrixXd fisher; 
+  if (nugget_est){
+    int p = params.size()-1;
+    VectorXd gamma = params.head(p);
+    nu = params(p);
+    grad = VectorXd::Zero(p+1);
+    fisher = MatrixXd::Zero(p+1,p+1);
+    if (zero_mean == "No"){
+      MatrixXd H = trend;
+      int q = H.cols();
+      //neen special case for i = 0
+      MatrixXd XSX = MatrixXd::Zero(q, q);
+      
+      // need to first compute this
+      vector<vector<MatrixXd>> Bi_inv_B_ir_list(n, vector<MatrixXd>(p+1));
+      vector<vector<MatrixXd>> Ai_inv_A_ir_list(n, vector<MatrixXd>(p+1));
+      vector<MatrixXd> Ri_Bi_inv_list(n);
+      vector<MatrixXd> Qi_Ai_inv_list(n);
+      vector<MatrixXd> dXSXr(p+1, MatrixXd::Zero(q,q));
+      vector<double> dlogdetr(p+1, 0.0);
+      vector<VectorXi> idx_list(n);
+      
+      // deal with i = 0 separetely, only B_i
+      
+      for (int i = 0; i < n; ++i) {
+        if (i == 0){
+          MatrixXd v_i = x.row(i);
+          MatrixXd R_i = H.row(i);
+          double B_i = kernel_func(v_i, v_i, gamma, nu, alpha)(0,0);
+          MatrixXd Ri_Bi_inv = (R_i * 1/B_i).transpose();
+          Ri_Bi_inv_list[i] = Ri_Bi_inv;
+          Qi_Ai_inv_list[i] = MatrixXd::Zero(q,1);
+          XSX += Ri_Bi_inv * R_i;
+          for (int r = 0; r < p; ++r){
+            MatrixXd B_ir = kernel_func_deriv_gamma_k(v_i, v_i, gamma, nu, alpha, r);
+            MatrixXd Bi_inv_B_ir = B_ir / B_i;
+            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_B_ir * R_i);
+            dlogdetr[r] += Bi_inv_B_ir.trace();
+            Bi_inv_B_ir_list[i][r] = Bi_inv_B_ir;
+            Ai_inv_A_ir_list[i][r] = MatrixXd::Zero(1,1);
+          }
+          dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose();
+          MatrixXd Bi_inv(1,1);
+          Bi_inv(0,0) = 1/B_i;
+          dlogdetr[p] += 1/B_i;
+          // the last column saves Bi_inv;
+          Bi_inv_B_ir_list[i][p] = Bi_inv;
+          Ai_inv_A_ir_list[i][p] = MatrixXd::Zero(1,1);
+          
+          for (int r = 0; r < p + 1; ++r){
+            for (int s = 0; s < p + 1; ++s){
+              fisher(r,s) += 0.5 * (Bi_inv_B_ir_list[i][r] * Bi_inv_B_ir_list[i][s]).trace();
+            }
+          }
+        } else{
+          int num_neighbors = std::min(i, m);
+          MatrixXd v_i(num_neighbors+1, p);
+          v_i.row(0) = x.row(i);
+          MatrixXd R_i(num_neighbors+1, q);
+          R_i.row(0) = H.row(i);
+          VectorXi idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose().cast<int>();
+          for (int j = 0; j < num_neighbors; ++j){
+            v_i.row(j+1) = x.row(idx[j] - 1);
+            R_i.row(j+1) = H.row(idx[j] - 1);
+          }
+          MatrixXd u_i = v_i.block(1, 0, num_neighbors, p);
+          MatrixXd B_i = kernel_func(v_i, v_i, gamma, nu, alpha);
+          // remove the first column and the first row;
+          MatrixXd A_i = B_i.block(1, 1, num_neighbors, num_neighbors);
+          MatrixXd Q_i = R_i.block(1, 0, num_neighbors, q);
+          
+          LLT<MatrixXd> llt_B_i(B_i); 
+          LLT<MatrixXd> llt_A_i(A_i);
+          MatrixXd Ri_Bi_inv = llt_B_i.solve(R_i).transpose();
+          Ri_Bi_inv_list[i] = Ri_Bi_inv;
+          MatrixXd Qi_Ai_inv = llt_A_i.solve(Q_i).transpose();
+          Qi_Ai_inv_list[i] = Qi_Ai_inv;
+          // done with XSX
+          XSX += Ri_Bi_inv * R_i - Qi_Ai_inv* Q_i;
+          
+          // deal with gamma derive first
+          for (int r = 0; r < p; ++r){
+            MatrixXd B_ir = kernel_func_deriv_gamma_k(v_i, v_i, gamma, nu, alpha, r);
+            MatrixXd A_ir = B_ir.block(1, 1, num_neighbors, num_neighbors);
+            MatrixXd Bi_inv_B_ir = llt_B_i.solve(B_ir);
+            MatrixXd Ai_inv_A_ir = llt_A_i.solve(A_ir);
+            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_B_ir * R_i) - Qi_Ai_inv * (Ai_inv_A_ir * Q_i);
+            dlogdetr[r] += Bi_inv_B_ir.trace() - Ai_inv_A_ir.trace();
+            Bi_inv_B_ir_list[i][r] = Bi_inv_B_ir;
+            Ai_inv_A_ir_list[i][r] = Ai_inv_A_ir;
+          }
+          // now nu derive Bi_inv
+          // done with dXSXr
+          dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose() - Qi_Ai_inv * Qi_Ai_inv.transpose();
+          MatrixXd Bi_inv = llt_B_i.solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
+          MatrixXd Ai_inv = llt_A_i.solve(MatrixXd::Identity(num_neighbors, num_neighbors));
+          // done with logdetr
+          dlogdetr[p] += Bi_inv.trace() - Ai_inv.trace();
+          // the last column saves Bi_inv;
+          Bi_inv_B_ir_list[i][p] = Bi_inv;
+          Ai_inv_A_ir_list[i][p] = Ai_inv;
+          // construct the fisher information matrix
+          for (int r = 0; r < p + 1; ++r){
+            for (int s = 0; s < p + 1; ++s){
+              fisher(r,s) += 0.5 * ((Bi_inv_B_ir_list[i][r] * Bi_inv_B_ir_list[i][s]).trace() -
+                (Ai_inv_A_ir_list[i][r] * Ai_inv_A_ir_list[i][s]).trace());
+            }
+          }
+        }
+      }
+      LLT<MatrixXd> llt_XSX(XSX);
+      MatrixXd XSX_inv = llt_XSX.solve(MatrixXd::Identity(q, q));
+      
+      // finish the fisher information matrix
+      fisher *= k;
+      
+      // deal with gamma and nu grad together
+      for (int j = 0; j < k; ++j){
+        double YSY_j = 0.0;
+        VectorXd dYSYr_j = VectorXd::Zero(p+1);
+        VectorXd XSY_j = VectorXd::Zero(q);
+        vector<VectorXd> dXSYr_j(p+1, VectorXd::Zero(q));
+        
+        VectorXd y_j = y.col(j);
+        for (int i = 1; i < n; ++i){
+          if (i == 0){
+            VectorXd y_v_i(1);
+            y_v_i[0] = y_j[0];
+            VectorXd Bi_inv_y_v_i = Bi_inv_B_ir_list[i][p] * y_v_i;
+            YSY_j += y_v_i.dot(Bi_inv_y_v_i);
+            XSY_j += Ri_Bi_inv_list[i] * y_v_i;
+            for (int r = 0; r < p+1; ++r){
+              dYSYr_j[r] -= y_v_i.dot(Bi_inv_B_ir_list[i][r] * (Bi_inv_y_v_i));
+              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_B_ir_list[i][r].transpose() * y_v_i);
+            }
+          } else{
+            int num_neighbors = std::min(i, m);
+            VectorXi idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose().cast<int>();
+            // construct yv_i and yu_i
+            VectorXd y_v_i(num_neighbors + 1);
+            y_v_i[0] = y_j[i];
+            for (int s = 0; s < num_neighbors; ++s){
+              y_v_i[s+1] = y_j[idx[s] - 1];
+            }
+            VectorXd y_u_i = y_v_i.tail(num_neighbors);
+            
+            VectorXd Bi_inv_y_v_i = Bi_inv_B_ir_list[i][p] * y_v_i;
+            VectorXd Ai_inv_y_u_i = Ai_inv_A_ir_list[i][p] * y_u_i;
+            YSY_j += y_v_i.dot(Bi_inv_y_v_i) - y_u_i.dot(Ai_inv_y_u_i);
+            XSY_j += Ri_Bi_inv_list[i] * y_v_i - Qi_Ai_inv_list[i] * y_u_i;
+            
+            for (int r = 0; r < p+1; ++r){
+              dYSYr_j[r] -= y_v_i.dot(Bi_inv_B_ir_list[i][r] * (Bi_inv_y_v_i)) -
+                y_u_i.dot(Ai_inv_A_ir_list[i][r] * (Ai_inv_y_u_i));
+              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_B_ir_list[i][r].transpose() * y_v_i) - 
+                Qi_Ai_inv_list[i] * (Ai_inv_A_ir_list[i][r].transpose() * y_u_i);
+            }
+          }
+        }
+        VectorXd XSX_inv_XSY_j = XSX_inv * XSY_j;
+        // construct grad_j
+        for (int r = 0; r < p + 1; ++r){
+          double temp1 = dYSYr_j[r] - 2 * dXSYr_j[r].transpose() * XSX_inv_XSY_j + 
+            XSY_j.transpose() * XSX_inv * dXSXr[r] * XSX_inv_XSY_j;
+          double temp2 = YSY_j - XSY_j.transpose() * XSX_inv_XSY_j;
+          double gradr_j = -n/2.0 * temp1 / temp2;
+          grad[r] += gradr_j;
+        }
+      }
+      // add logdetr to the full gradient
+      for (int r = 0; r < p+1; ++r){
+        grad[r] -= k/2.0 * dlogdetr[r];
+      }
     }
   }
-  return res;
+  auto end = high_resolution_clock::now();
+  duration<double> diff = end - start;
+  Rcpp::Rcout << "Fisher Scoring took " << diff.count() << " seconds.\n";
+  return Rcpp::List::create(grad, fisher);
 }
+
 // [[Rcpp::export]]
 MatrixXd Chol(const MatrixXd &R){
   
