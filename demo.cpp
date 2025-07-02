@@ -11,6 +11,8 @@ using namespace Rcpp;
 using namespace std;
 // [[Rcpp::depends(RcppEigen)]] 
 
+const double pi = 3.14159265358979323846;
+
 // [[Rcpp::export]]
 MatrixXd Exp2Sep(const MatrixXd &x1, const MatrixXd &x2, 
   const VectorXd gamma, const double nu, const double alpha) { 
@@ -858,6 +860,7 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
   }
   VectorXd grad;
   MatrixXd fisher; 
+  double loglik;
   if (nugget_est){
     int p = params.size()-1;
     // convert the parameters
@@ -882,7 +885,7 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
       vector<MatrixXd> dXSXr(p+1, MatrixXd::Zero(q,q));
       vector<double> dlogdetr(p+1, 0.0);
       vector<VectorXi> idx_list(n);
-      
+      double logdet = 0.0;
       // deal with i = 0 separetely, only B_i
       
       for (int i = 0; i < n; ++i) {
@@ -915,6 +918,8 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
               fisher(r,s) += 0.5 * (Bi_inv_B_ir_list[i][r] * Bi_inv_B_ir_list[i][s]).trace();
             }
           }
+          
+          logdet += log(B_i);
         } else{
           int num_neighbors = std::min(i, m);
           MatrixXd v_i(num_neighbors+1, p);
@@ -955,8 +960,19 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
           // now nu derive, B_ir = I, A_ir = I
           // done with dXSXr
           dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose() - Qi_Ai_inv * Qi_Ai_inv.transpose();
-          MatrixXd Bi_inv = llt_B_i.solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
-          MatrixXd Ai_inv = llt_A_i.solve(MatrixXd::Identity(num_neighbors, num_neighbors));
+          
+          // calculate the logdet for the loglikelihood
+          MatrixXd LB_i = llt_B_i.matrixL();
+          double logdet_B_i = 2.0 * LB_i.diagonal().array().log().sum();
+          MatrixXd LA_i = llt_A_i.matrixL();
+          double logdet_A_i = 2.0 * LA_i.diagonal().array().log().sum();
+          logdet += logdet_B_i - logdet_A_i;
+          
+          MatrixXd temp_B_i = LB_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
+          MatrixXd Bi_inv = LB_i.transpose().triangularView<Upper>().solve(temp_B_i);
+          
+          MatrixXd temp_A_i = LA_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors, num_neighbors));
+          MatrixXd Ai_inv = LA_i.transpose().triangularView<Upper>().solve(temp_A_i);
           // done with logdetr
           dlogdetr[p] += Bi_inv.trace() - Ai_inv.trace();
           // the last column saves Bi_inv;
@@ -983,6 +999,7 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
       MatrixXd J = diag_values.asDiagonal();
       fisher = J * fisher;
       
+      double log_sigma = 0.0;
       // deal with gamma and nu grad together
       for (int j = 0; j < k; ++j){
         double YSY_j = 0.0;
@@ -1029,21 +1046,26 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
         }
         VectorXd XSX_inv_XSY_j = XSX_inv * XSY_j;
         // construct grad_j
+        double temp2 = YSY_j - XSY_j.transpose() * XSX_inv_XSY_j;
         for (int r = 0; r < p + 1; ++r){
           double temp1 = dYSYr_j[r] - 2 * dXSYr_j[r].transpose() * XSX_inv_XSY_j + 
             XSX_inv_XSY_j.transpose() * dXSXr[r] * XSX_inv_XSY_j;
-          double temp2 = YSY_j - XSY_j.transpose() * XSX_inv_XSY_j;
           double gradr_j = -n/2.0 * temp1 / temp2;
           grad[r] += gradr_j;
         }
+        
+        double sigma_j = temp2 / n;
+        log_sigma += log(sigma_j);
       }
-      // add logdetr to the full gradient
+      // add logdetr to the full gradient and adjust for eta and tau
       for (int r = 0; r < p; ++r){
         grad[r] -= k/2.0 * dlogdetr[r];
         grad[r] = -gamma[r] * grad[r];
       }
       grad[p] -= k/2.0 * dlogdetr[p];
       grad[p] = nu * grad[p];
+      
+      loglik = - n * k/2.0 * log(2 * pi) - n/2.0 * log_sigma - k / 2.0 * logdet - n * k / 2.0;
     } else{
       // if zero_mean = TRUE
     }
@@ -1053,7 +1075,7 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
   auto end = high_resolution_clock::now();
   duration<double> diff = end - start;
   Rcpp::Rcout << "Fisher Scoring took " << diff.count() << " seconds.\n";
-  return Rcpp::List::create(grad, fisher);
+  return Rcpp::List::create(loglik, grad, fisher);
 }
 
 // [[Rcpp::export]]
