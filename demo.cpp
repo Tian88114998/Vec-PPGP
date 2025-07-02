@@ -557,6 +557,7 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       VectorXd ucol = Ucolumn(i_column, idx, i, n);
       matrix_list[p].col(i) = ucol;
     }
+    
     if (zero_mean == "Yes"){
       MatrixXd Ut = U.transpose();
       for (int j = 0; j < p+1; ++j){
@@ -612,8 +613,8 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     // clip the gradient
     VectorXd grad_clip(p+1);
     for (int j = 0; j < p+1; ++j){
-      if (std::abs(grad(j)) > 1e5) {
-        grad_clip(j) = std::copysign(1e5, grad(j));
+      if (std::abs(grad(j)) > 1e7) {
+        grad_clip(j) = std::copysign(1e7, grad(j));
       } else{
         grad_clip(j) = grad(j);
       }
@@ -693,6 +694,7 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       }
     }
     // finish the gradient of gamma
+    
     if (zero_mean == "Yes"){
       MatrixXd Ut = U.transpose();
       for (int j = 0; j < p; ++j){
@@ -709,34 +711,47 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
         }
       }
     } else{
-      MatrixXd Ut = U.transpose();
-      MatrixXd UUt = U*Ut;
       int q = H.cols();
+      MatrixXd Ut = U.transpose();
+      MatrixXd UtH = Ut*H;
+      MatrixXd UUtH = U * UtH;
       MatrixXd Ht = H.transpose();
-      MatrixXd N = Ht * UUt * H;
+      MatrixXd N = Ht * UUtH;
       LLT<MatrixXd> llt(N);
       MatrixXd N_inv = llt.solve(MatrixXd::Identity(q, q));
+      MatrixXd N_inv_Ht = N_inv * Ht;
       MatrixXd H_N_inv_Ht = H * N_inv * Ht;
-      MatrixXd Q1 = MatrixXd::Identity(n,n) - H_N_inv_Ht * UUt;
-      MatrixXd Q = UUt * Q1;
-      MatrixXd H_N_Ht = H * N * Ht;
+      
       for (int j = 0; j < p; ++j){
-        MatrixXd M = matrix_list[j] * Ut;
-        MatrixXd dQ = M * Q1 + UUt * (H_N_inv_Ht * M * H_N_inv_Ht * UUt - H_N_inv_Ht * M);
         grad(j) -= k * sum_log_deriv(j);
-        grad(j) += k * (N_inv * Ht * M * H).diagonal().sum();
-        for (int z = 0; z < k; ++z) {
-          MatrixXd temp6 = y.col(z).transpose() * Q * y.col(z);
-          MatrixXd temp7 = y.col(z).transpose() * dQ * y.col(z);
-          grad(j) += (n-q) * 1/temp6(0,0) * temp7(0,0);
+        MatrixXd MH = matrix_list[j] * UtH;
+        MatrixXd HtMH = Ht * MH;
+        grad(j) += k * (N_inv * HtMH).diagonal().sum();
+      }
+      for (int z = 0; z < k; ++z){
+        VectorXd y_z = y.col(z);
+        MatrixXd Ut_y_z = Ut * y_z;
+        MatrixXd UUt_y_z = U * Ut_y_z;
+        // Q1 = Ut_H_N_inv_Ht_UUt_y_z
+        MatrixXd Q1 = Ut * (H_N_inv_Ht * UUt_y_z);
+        VectorXd Qy_z = UUt_y_z - U * Q1;
+        double temp5 = y_z.dot(Qy_z);
+        for (int j = 0; j < p; ++j){
+          MatrixXd first_term = matrix_list[j] * Ut_y_z;
+          MatrixXd second_term = matrix_list[j] * Q1;
+          MatrixXd third_term = U * (Ut * (H_N_inv_Ht * second_term));
+          MatrixXd fourth_term = U * (Ut * (H_N_inv_Ht * first_term));
+          VectorXd Qj_y_z = first_term - second_term + third_term - fourth_term;
+          double temp6 = y_z.dot(Qj_y_z);
+          grad(j) += (n-q) * 1/temp5 * temp6;
         }
       }
     }
     // clip the gradient
     VectorXd grad_clip(p);
     for (int j = 0; j < p; ++j){
-      if (std::abs(grad(j)) > 1e5) {
-        grad_clip(j) = std::copysign(1e5, grad(j));
+      if (std::abs(grad(j)) > 1e7) {
+        grad_clip(j) = std::copysign(1e7, grad(j));
       } else{
         grad_clip(j) = grad(j);
       }
@@ -816,7 +831,7 @@ List predict(const MatrixXd &x, const MatrixXd &xp, const MatrixXd &NNmatrix,
 }
 
 // [[Rcpp::export]]
-List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
+List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
                     const MatrixXd &x, const MatrixXd &NNmatrix,
                     const MatrixXd &y,
                     const String kernel_type, const double alpha, 
@@ -845,8 +860,12 @@ List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
   MatrixXd fisher; 
   if (nugget_est){
     int p = params.size()-1;
-    VectorXd gamma = params.head(p);
-    nu = params(p);
+    // convert the parameters
+    VectorXd eta = params.head(p);
+    tau = params(p);
+    VectorXd gamma = (-eta).array().exp();
+    double nu = exp(tau);
+    
     grad = VectorXd::Zero(p+1);
     fisher = MatrixXd::Zero(p+1,p+1);
     if (zero_mean == "No"){
@@ -920,7 +939,7 @@ List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
           MatrixXd Qi_Ai_inv = llt_A_i.solve(Q_i).transpose();
           Qi_Ai_inv_list[i] = Qi_Ai_inv;
           // done with XSX
-          XSX += Ri_Bi_inv * R_i - Qi_Ai_inv* Q_i;
+          XSX += Ri_Bi_inv * R_i - Qi_Ai_inv * Q_i;
           
           // deal with gamma derive first
           for (int r = 0; r < p; ++r){
@@ -933,7 +952,7 @@ List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
             Bi_inv_B_ir_list[i][r] = Bi_inv_B_ir;
             Ai_inv_A_ir_list[i][r] = Ai_inv_A_ir;
           }
-          // now nu derive Bi_inv
+          // now nu derive, B_ir = I, A_ir = I
           // done with dXSXr
           dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose() - Qi_Ai_inv * Qi_Ai_inv.transpose();
           MatrixXd Bi_inv = llt_B_i.solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
@@ -957,6 +976,12 @@ List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
       
       // finish the fisher information matrix
       fisher *= k;
+      // TODO:: add transform. 
+      VectorXd diag_values(p+1);
+      diag_values.head(p) = gamma.array().square();
+      diag_values[p] = nu * nu;
+      MatrixXd J = diag_values.asDiagonal();
+      fisher = J * fisher;
       
       // deal with gamma and nu grad together
       for (int j = 0; j < k; ++j){
@@ -988,6 +1013,7 @@ List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
             }
             VectorXd y_u_i = y_v_i.tail(num_neighbors);
             
+            
             VectorXd Bi_inv_y_v_i = Bi_inv_B_ir_list[i][p] * y_v_i;
             VectorXd Ai_inv_y_u_i = Ai_inv_A_ir_list[i][p] * y_u_i;
             YSY_j += y_v_i.dot(Bi_inv_y_v_i) - y_u_i.dot(Ai_inv_y_u_i);
@@ -1005,17 +1031,24 @@ List fisher_scoring(const VectorXd params, double nu, const bool nugget_est,
         // construct grad_j
         for (int r = 0; r < p + 1; ++r){
           double temp1 = dYSYr_j[r] - 2 * dXSYr_j[r].transpose() * XSX_inv_XSY_j + 
-            XSY_j.transpose() * XSX_inv * dXSXr[r] * XSX_inv_XSY_j;
+            XSX_inv_XSY_j.transpose() * dXSXr[r] * XSX_inv_XSY_j;
           double temp2 = YSY_j - XSY_j.transpose() * XSX_inv_XSY_j;
           double gradr_j = -n/2.0 * temp1 / temp2;
           grad[r] += gradr_j;
         }
       }
       // add logdetr to the full gradient
-      for (int r = 0; r < p+1; ++r){
+      for (int r = 0; r < p; ++r){
         grad[r] -= k/2.0 * dlogdetr[r];
+        grad[r] = -gamma[r] * grad[r];
       }
+      grad[p] -= k/2.0 * dlogdetr[p];
+      grad[p] = nu * grad[p];
+    } else{
+      // if zero_mean = TRUE
     }
+  } else{ // if nugget_est = FALSE
+    
   }
   auto end = high_resolution_clock::now();
   duration<double> diff = end - start;
