@@ -20,6 +20,7 @@ library(MASS)
 library(ggplot2)
 library(gridExtra)
 library(patchwork)
+library(nloptr)
 sourceCpp("src/demo.cpp")
 ```
 
@@ -604,16 +605,17 @@ res = log_marginal_lik_ppgasp(param = c(log_inv_gamma), nugget = 0, nugget_est =
 
 ```{r}
 # now try 2d case
-n = 100
+n = 300
 Xo = randomLHS(n = n, k = 2)
 
 gamma = c(2,3)
 sigma2 = 1
-nu = 0
+nu = 1
 Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
 Yo = mvrnorm(n=1, mu = rep(0,n), Sigma = Sigma)
 Yo = matrix(Yo, nrow = n)
 
+Umatrix(ordered_sample, nnmatrix, gamma, nu, kernel_type = "matern_3_2", alpha = 1.9)
 set.seed(2001)
 maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
@@ -638,7 +640,7 @@ res[[1]]
 # now we add a nugget, 2 gamma, 1 nu.
 sourceCpp("src/demo.cpp")
 set.seed(2001)
-n = 100
+n = 500
 Xo = randomLHS(n = n, k = 2)
 
 gamma = c(2, 3)
@@ -654,19 +656,21 @@ maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
 nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
 
-res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), nu = 1, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), kernel_type = "matern_5_2", alpha = 1.9, zero_mean = "No")
-
+system.time(
+  {res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), nu = 2, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), kernel_type = "matern_5_2", alpha = 1.9, zero_mean = "No")}
+)
 
 R0 = generate_R0(ordered_sample, ordered_sample)
 log_inv_gamma = log(1/gamma)
 # the input type of kernel_type is wrong. It only takes integer, not string
 log_nu = log(nu)
-res = RobustGaSP::log_marginal_lik_ppgasp(param = c(log_inv_gamma, log_nu), nugget = 2, nugget_est = TRUE,
+system.time({
+res = RobustGaSP::log_marginal_lik_ppgasp(param = c(log_inv_gamma, log_nu), nugget = 2, nugget_est = FALSE,
                         R0 = R0, X = matrix(1, nrow = n), zero_mean = "No", 
                         output = Yo, kernel_type = c(3,3), alpha = c(1.9,1.9))
+})
 c(res_vec[[1]], res[[1]])
 # the likelihood are still the same
-
 ```
 
 ```{r likelihood_plot}
@@ -681,7 +685,7 @@ Xo = randomLHS(n = n+np, k = p)
 
 gamma_range = c(0.1, 2)
 sigma2_range = c(0.1, 1)
-nugget_range = c(0.1, 2)
+nugget_range = c(0.1, 0.5)
 Yo <- matrix(0, nrow = n+np, ncol = k)
 for (i in 1:k){
   gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
@@ -834,24 +838,24 @@ res_vec[[1]]
 ```
 
 ```{r likelihood_parameters}
-n = 500
-p = 1
+n = 300
+p = 2
 k = 5
-temp = generate_data(n = n, p = p, k = k, gamma_range = c(0, 2), sigma2_range = c(0,0.5), nugget_range = c(0,1))
+temp = generate_data(n = n, p = p, k = k, gamma_range, sigma2_range , nugget_range)
 Xo = temp[[1]]
 Yo = temp[[2]]
 
 n_param = 100
 # tau and eta is from -1 to 1
-tau = seq(-2, 2, length.out = n_param)
-eta = seq(-2, 2, length.out = n_param)
+eta = seq(-1, 4, length.out = n_param)
+tau = seq(-4, 1, length.out = n_param)
 # nu and gamma are from 0.36 to 2.718
 nu = exp(tau)
 gamma = 1/exp(eta)
 
-m_list = round(c(n-1, n/2, n/4, n/6, n/8, n/10))
+m_list = round(c(n-1, n/2, n/5, n/10, n/20, n / 30))
 
-matrix_list = lapply(1:length(m_list), function(x) matrix(0, nrow = 100, ncol = 100))
+matrix_list = lapply(1:length(m_list), function(x) matrix(0, nrow = n_param, ncol = n_param))
 
 set.seed(2001)
 maxmin_order <- GpGp::order_maxmin(Xo)
@@ -864,27 +868,95 @@ for (i in 1:length(m_list)){
     for (k in 1:n_param){
       gamma_j = gamma[j]
       nu_k = nu[k]
-      res = neg_vecchia_marginal_log_likelihood(params = c(gamma_j, nu_k), x =ordered_sample,NNmatrix = nnmatrix, y = ordered_response, kernel_type = "pow_exp", nu = 0, nugget_est = TRUE, alpha = 1.9)
+      res = neg_vecchia_marginal_log_likelihood(params = c(gamma_j, nu_k), x =ordered_sample,NNmatrix = nnmatrix, y = ordered_response, kernel_type = "pow_exp", nu = 0, nugget_est = TRUE, alpha = 1.9, trend = matrix(1, 300, 1), zero_mean = "Yes")
       matrix_list[[i]][j,k] = res
     }
   }
 }
 
-z_df <- expand.grid(X = eta, Y = tau)
-z_df$Z <- as.vector(t(matrix_list[[1]]))
+library(viridisLite)
+z_range <- range(unlist(matrix_list))
+plots = lapply(1:6, function(i){
+  df <- data.frame(expand.grid(eta = eta, tau = tau),
+                 log_likelihood = as.vector(matrix_list[[i]]))  # repeat for each i
 
-ggplot(z_df, aes(X, Y, fill = Z)) +
+  p <- ggplot(df, aes(x = eta, y = tau, fill = log_likelihood)) +
   geom_tile() +
-  scale_fill_viridis_c() +
-  labs(title = "Heatmap with ggplot2", fill = "Z") +
+  scale_fill_gradientn(colours = terrain.colors(20),
+                       limits = z_range) +
+  labs(x = expression(eta), y = expression(tau)) +
   theme_minimal()
-
-filled.contour(eta, tau, t(matrix_list[[1]]),
-               color.palette = terrain.colors,
-               xlab = "X", ylab = "Y",
-               main = "Filled Contour Plot")
+  if (i != 1) {
+    p <- p + theme(legend.position = "none")
+  }
+  
+  return(p)
+})
+combined_plot <- (plots[[1]] | plots[[2]] | plots[[3]]) /
+(plots[[4]] | plots[[5]] | plots[[6]]) +   plot_layout(guides = "collect") & theme(legend.position = "right")
+m_list
+ggsave(filename = "combined_plot.png", plot = combined_plot, width = 12, height = 8, dpi = 300)
 ```
 
+
+```{r}
+n = 300
+p = 2
+k = 5
+temp = generate_data(n = n, p = p, k = k, gamma_range, sigma2_range , nugget_range)
+Xo = temp[[1]]
+Yo = temp[[2]]
+
+n_param = 100
+# tau and eta is from -1 to 1
+eta1 = seq(-1, 4, length.out = n_param)
+eta2 = seq(-1, 4, length.out = n_param)
+# nu and gamma are from 0.36 to 2.718
+gamma1 = 1/exp(eta1)
+gamma2 = 1/exp(eta2)
+
+m_list = round(c(n-1, n/2, n/3, n/5, n/10, n/20))
+
+matrix_list = lapply(1:length(m_list), function(x) matrix(0, nrow = n_param, ncol = n_param))
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- as.matrix(Xo[maxmin_order,])
+ordered_response <- Yo[maxmin_order,]
+for (i in 1:length(m_list)){
+  nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = m_list[i])
+  for (j in 1:n_param){
+    for (k in 1:n_param){
+      gamma_j = gamma1[j]
+      gamma_k = gamma2[k]
+      res = neg_vecchia_marginal_log_likelihood(params = c(gamma_j, gamma_k), x =ordered_sample,NNmatrix = nnmatrix, y = ordered_response, kernel_type = "pow_exp", nu = 0, nugget_est = FALSE, alpha = 1.9, trend = matrix(1, 300, 1), zero_mean = "No")
+      matrix_list[[i]][j,k] = res
+    }
+  }
+}
+
+library(viridisLite)
+z_range <- range(unlist(matrix_list))
+plots = lapply(1:6, function(i){
+  df <- data.frame(expand.grid(eta1 = eta1, eta2 = eta2),
+                 log_likelihood = as.vector(matrix_list[[i]]))  # repeat for each i
+
+  p <- ggplot(df, aes(x = eta1, y = eta2, fill = log_likelihood)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = terrain.colors(20),
+                       limits = z_range) +
+  labs(x = expression(eta[1]), y = expression(eta[2])) +
+  theme_minimal()
+  if (i != 1) {
+    p <- p + theme(legend.position = "none")
+  }
+  
+  return(p)
+})
+combined_plot <- (plots[[1]] | plots[[2]] | plots[[3]]) /
+(plots[[4]] | plots[[5]] | plots[[6]]) +   plot_layout(guides = "collect") & theme(legend.position = "right")
+ggsave(filename = "combined_pow.png", plot = combined_plot, width = 12, height = 8, dpi = 300)
+```
 
 
 ```{r deriv_1gamma}
@@ -914,8 +986,6 @@ log_inv_gamma = log(1/gamma)
 log_like_deriv = log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma), nugget = 0, nugget_est = FALSE, R0 = R0, X = matrix(0, ncol = n), zero_mean = "Yes", output = Yo, kernel_type = 2, alpha = 1.9)
 
 neg_log_like_vec_deriv = neg_vecchia_marginal_log_likelihood_deriv(params = c(gamma), nu = 0, nugget_est = FALSE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, kernel_type = "matern_3_2", alpha = 1.9)[[1]]
-
-7.70137 / 9
 # the results are the same
 ```
 Note that in ppgasp, the derivative is w.r.t the inverse of range parameters.
@@ -923,8 +993,8 @@ $$\frac{\partial l(\gamma)}{\partial 1/\gamma} = \frac{\partial l(\gamma)}{\part
 ```{r deriv_2gamma_nugget}
 # check the derivative of the likelihood 2 gamma with nugget
 sourceCpp("src/demo.cpp")
-set.seed(2001)
-n = 100
+set.seed(2002)
+n = 500
 Xo = randomLHS(n = n, k = 2)
 
 gamma = c(2,3)
@@ -942,82 +1012,107 @@ nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
 
 R0 = generate_R0(ordered_sample, ordered_sample)
 log_inv_gamma = log(1/gamma)
+log_nu = log(nu)
 # What is the nugget-variance ratio parameter?
 # Why the derivative of gamma is different when nugget_est = TRUE/FALSE?
 # since the input is the log of nugget-variance ratio, if the ratio is 1, then the input should 
 # be log(1) = 0. The length of alpha/kernel_type should be the same as gamma
-log_nu = log(nu)
-log_like_deriv = RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, log_nu), nugget = nu, nugget_est = TRUE, R0 = R0, X = matrix(1, nrow = n), zero_mean = "Yes",output = Yo, kernel_type = c(3,3), alpha =c(1.9,1.9))
+system.time({
+  log_like_deriv = RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, log_nu), nugget = nu, nugget_est = TRUE, R0 = R0, X = matrix(1, nrow = n), zero_mean = "No",output = Yo, kernel_type = c(1,1), alpha =c(1.9,1.9))
+})
 
-temp = neg_vecchia_marginal_log_likelihood_deriv(params = c(gamma, nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), zero_mean = "Yes", kernel_type = "matern_5_2", alpha = 1.9)
+neg_vecchia_marginal_log_likelihood_deriv(c(log_inv_gamma,log_nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "pow_exp", alpha = 1.9, zero_mean = "No")
+
+m_list = round(seq(1, 499, length.out = 200))
+time_list = c()
+for (i in 1:200){
+  nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = m_list[i])
+  start_time = Sys.time()
+  temp = neg_vecchia_marginal_log_likelihood_deriv(params = c(gamma,nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), zero_mean = "No", kernel_type = "pow_exp", alpha = 1.9)
+  end_time = Sys.time()
+  time_diff = as.numeric(end_time - start_time)
+  time_list = c(time_list, time_diff)
+}
+
+df = data.frame(m = m_list, time = time_list)
+loglik = ggplot(df, aes(x = m, y = time)) + 
+  geom_line(aes(color = "Vec-PPGP")) + 
+  geom_point(aes(color = "Vec-PPGP")) + 
+  labs(x = "m", y = "Seconds", title = "Negative Vec-PPGP Log-Likelihood Gradient Running Time for Different Numbers of Neighbors", color = "Legend") + 
+  theme(plot.title = element_text(size = 10))
 ```
 
 ```{r deriv_with_mean}
 # check the derivative with mean
+sourceCpp("src/demo.cpp") 
 set.seed(2001)
-temp = generate_data(n = 200, p = 5, k = 5, gamma_range, sigma2_range, nugget_range)
-n = 200
+temp = generate_data(n = 500, p = 5, k = 5, gamma_range, sigma2_range, nugget_range)
+n = 500
 p = 5
 Xo = temp[[1]]
 Yo = temp[[2]]
 maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
-nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 30)
 gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
 nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+eta = log(1/gamma)
+tau = log(nu)
 
-neg_vecchia_marginal_log_likelihood_deriv(c(gamma,nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "pow_exp", alpha = 1.9, zero_mean = "Yes")
+neg_vecchia_marginal_log_likelihood_deriv(c(gamma,nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "matern_3_2", alpha = 1.9, zero_mean = "No")
 
 R0 = generate_R0(ordered_sample, ordered_sample)
 log_inv_gamma = log(1/gamma)
-
-RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, nu), nugget = nu, nugget_est = TRUE, R0 = R0, X = matrix(1, ncol = n), zero_mean = "No",output = Yo, kernel_type = c(1,1,1,1,1), alpha =c(1.9,1.9,1.9,1.9,1.9))
+log_nu = log(nu)
+system.time({
+  RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, log_nu), nugget = nu, nugget_est = TRUE, R0 = R0, X = matrix(1, nrow = n), zero_mean = "No",output = Yo, kernel_type = c(1,1,1,1,1), alpha =c(1.9,1.9,1.9,1.9,1.9))
+})
 ```
 
 ```{r optim_fixed_nugget}
 # maybe we need to reparameterize the parameters so the optimization is stable
-
 sourceCpp("src/demo.cpp")
 set.seed(2001)
-n = 1500
+n = 1000
 p = 5
 k = 5
-Xo = randomLHS(n = n, k = k)
-
-gamma_range = c(0.1, 2)
-sigma2_range = c(0.1, 1)
-nugget_range = c(0.1, 0.5)
-Yo <- matrix(0, nrow = n, ncol = k)
-for (i in 1:k){
-  gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
-  sigma2 = 1
-  nugget = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
-  
-  Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
-  Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n)
-
-  Y_i = rmvnorm(1, sigma=Sigma_nugget)
-  Y_i = t(Y_i)
-  Yo[,i] = Y_i
-}
-
+temp = generate_data(n, p, k, gamma_range, sigma2_range, nugget_range)
+Xo = temp[[1]]
+Yo = temp[[2]]
 maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
-nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
+nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 50)
 gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
 nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
 
 set.seed(2001)
 start_time = Sys.time()
-res = optim(par = c(gamma), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = nu, nugget_est = FALSE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, alpha = 1.9, method = "BFGS")
+res = nloptr::lbfgs(x0 = c(gamma), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-6, 5), nu = nu, nugget_est = FALSE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo,kernel_type = "matern_3_2", alpha = 1.9,trend = matrix(1,1000,1), zero_mean = "No")
 end_time = Sys.time()
 end_time - start_time
 
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(gamma, nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, method = "L-BFGS-B",lower = rep(10e-9, 6), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, kernel_type = "pow_exp",alpha = 1.9, trend = matrix(1,1000,1), zero_mean = "No")
+end_time = Sys.time()
+end_time - start_time
+# Matern 3 2 with nugget Time difference of 25.31712 secs
+# Matern 3 2 without nugget Time difference of 2.024291 mins
+# Pow Exp with nugget Time difference of 34.48426 secs
+
 start_time <- Sys.time()
-m.ppgasp=ppgasp(design=ordered_sample, response=Yo, nugget = nu, nugget.est = FALSE, zero.mean = "Yes", kernel_type = "pow_exp")
+m.ppgasp=ppgasp(design=ordered_sample, response=Yo, nugget = nu, nugget.est = FALSE, zero.mean = "No", optimization = 'lbfgs', kernel_type = "matern_3_2")
 end_time <- Sys.time()
 show(m.ppgasp)
+end_time - start_time
+# Matern 3 2 with nugget Time difference of 1.536487 mins
+# Matern 3 2 without nugget Time difference of 1.189501 mins
+??ppgasp
 
+temp = Umatrix(ordered_sample, nnmatrix, gamma, nu, kernel_type = "pow_exp", alpha = 1.9)
+U = temp[[1]]
+UUt = U %*% t(U)
+UUt[1:50, 100:150]
 # the estimated parameters look like they are in the reasonable range compared to ppgasp
 ```
 
@@ -1025,8 +1120,15 @@ show(m.ppgasp)
 # this code trains and predicts on the simulated data with fixed nugget
 # try different kernel type: pow_exp, matern_3_2, matern_5_2
 # generate the data in likelihood_large_scale chunk
+sourceCpp('src/demo.cpp')
 m = 50
 set.seed(2001)
+n = 1500
+p = 5
+k = 5
+temp = generate_data(n, p, k, gamma_range, sigma2_range, nugget_range)
+Xo = temp[[1]]
+Yo = temp[[2]]
 maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
 ordered_response <- Yo[maxmin_order,]
@@ -1045,20 +1147,20 @@ nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
 
 set.seed(2001)
 start_time = Sys.time()
-res = optim(par = c(gamma), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = FALSE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_5_2", alpha = 1.9, method = "L-BFGS-B")
+res = optim(par = c(gamma), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 5), nu = nu, nugget_est = FALSE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered,  method = "L-BFGS-B", kernel_type = "matern_3_2", alpha = 1.9, trend = matrix(1,1000,1), zero_mean = "No")
 end_time = Sys.time()
-end_time - start_time
-# 21.89422 secs
+end_time - start_time 
+# 19.89422 secs 30 eval
 
 ## Compare to PPGP 
 start_time <- Sys.time()
-m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget = 1, nugget.est = F, kernel_type = "matern_5_2", zero.mean = "No", optimization = 'lbfgs')
+m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget = nu, nugget.est = F, kernel_type = "matern_3_2", method = "mmle", zero.mean = "No", optimization = 'lbfgs')
 end_time <- Sys.time()
 end_time - start_time
 # Time difference without the nugget estimation is 37.43615 secs
 # With nugget estimation is 1.182473 mins
 
-list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par, nu = 1, kernel_type = "matern_5_2", alpha = 1.9, q = qnorm(0.975, 0, 1))
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[1:length(res$par)], nu = 1, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), zero_mean = "No")
 
 mse(Y_test_ordered, list[[1]])
 pci(Y_test_ordered, list[[2]], list[[3]])
@@ -1074,14 +1176,16 @@ lci(m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
 
 ```{r pred_est_nugget}
 # this code trains and predicts on the simulated data with estimated nugget
+sourceCpp("src/demo.cpp")
+
 set.seed(2001)
 start_time = Sys.time()
-res = optim(par = c(gamma, nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = nu, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_5_2",alpha = 1.9, method = "L-BFGS-B")
+res = optim(par = c(gamma, nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), method = "L-BFGS-B", nu = nu, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2",alpha = 1.9, trend = matrix(1,1000,1), zero_mean = "No")
 end_time = Sys.time()
 end_time - start_time
 # Time difference of 47.37236 secs
 
-list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "matern_5_2", alpha = 1.9, q = qnorm(0.975, 0, 1))
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), zero_mean = "No")
 
 mse(Y_test_ordered, list[[1]])
 pci(Y_test_ordered, list[[2]], list[[3]])
@@ -1089,7 +1193,7 @@ lci(list[[2]], list[[3]])
 
 ## Compare to PPGP 
 start_time <- Sys.time()
-m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget.est = T, kernel_type = "matern_5_2", zero.mean = "No", optimization = 'lbfgs')
+m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget.est = T, kernel_type = "matern_3_2", zero.mean = "No", method = "mmle", optimization = 'lbfgs')
 end_time <- Sys.time()
 end_time - start_time
 # Time difference of 1.729538 mins
@@ -1105,7 +1209,7 @@ library(repmis)
 source_data("https://github.com/MengyangGu/TITAN2D/blob/master/TITAN2D.rda?raw=True")
 
 set.seed(2001)
-m = 30
+m = 25
 maxmin_order <- GpGp::order_maxmin(input_variables[,1:3])
 ordered_sample <- input_variables[maxmin_order,1:3]
 ordered_response <- pyroclastic_flow_heights[maxmin_order,]
@@ -1139,7 +1243,7 @@ system.time(
                     response=as.matrix(Y_train_ordered_log_1[,-index_all_zero]),
                     trend=cbind(rep(1,n),X_train_ordered[,1]),
                     nugget.est=T,max_eval=100,num_initial_values=3,
-                    optimization='nelder-mead')
+                    optimization='lbfgs')
     pred_ppgasp=predict.ppgasp(m.ppgasp,X_test_ordered,
                                testing_trend=cbind(rep(1,n_testing),
                                                    X_test_ordered[,1]))
@@ -1154,7 +1258,7 @@ system.time(
     m_pred_ppgasp_UB[which(m_pred_ppgasp_UB<0)]=0
   }
 )
-# time used 161.086 for n = 200
+# time used 164.487 s for n = 200
 # 12.488s for n = 50 
 
 mse(as.matrix(Y_test_ordered[,-index_all_zero]), m_pred_ppgasp_mean)
@@ -1169,13 +1273,12 @@ nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
 
 set.seed(2001)
 start_time = Sys.time()
-res = optim(par = c(gamma,nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), alpha = 1.9, method = "L-BFGS-B")
+res = optim(par = c(gamma,nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-5, 4), method = "L-BFGS-B", nu = 1, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "matern_3_2", alpha = 1.9, trend=cbind(rep(1,n),X_train_ordered[,1]), zero_mean = "No")
 end_time = Sys.time()
 end_time - start_time
-# Time difference of 359.4098 s for n = 50
-# Time difference of 4.5275 s
+# Time difference of 19.48 s for m = 30
 
-list = predict(x = as.matrix(X_train_ordered), xp = as.matrix(X_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], alpha = 1.9, q = qnorm(0.975, 0, 1))
+list = predict(x = as.matrix(X_train_ordered), xp = as.matrix(X_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = cbind(rep(1,n),X_train_ordered[,1]), testing_trend = cbind(rep(1,n_testing),X_test_ordered[,1]), zero_mean = "No")
 
 # transform back
 vec_ppgasp_mean=exp(list[[1]])-1
@@ -1189,10 +1292,12 @@ mse(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_mean)
 pci(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_LB, vec_ppgasp_UB)
 lci(vec_ppgasp_LB, vec_ppgasp_UB)
 
-
+temp = neg_vecchia_marginal_log_likelihood_deriv(params = c(0.362137,2.35245,0.563513,0.110119), nu = 1, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "pow_exp", alpha = 1.9, trend=cbind(rep(1,n),X_train_ordered[,1]), zero_mean = "No")
 ```
+
 ```{r diff_ordering}
 # try different orderings on simulated and real datasets
+sourceCpp("src/demo.cpp")
 temp = generate_data(n=1500, p =5, k=10, gamma_range = c(0.1, 2), sigma2_range = c(0.1, 1),nugget_range = c(0.1, 2))
 Xo = temp[[1]]
 Yo = temp[[2]]
@@ -1237,6 +1342,7 @@ for (i in list(maxmin_order, middleout_order, coor_sum_order, random_order)){
   lci_list = c(lci_list, lci_i)
 }
 
+neg_vecchia_marginal_log_likelihood_deriv(params = gamma, nu = 1, nugget_est = FALSE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "pow_exp",alpha = 1.9, trend = matrix(1,1000, 1),zero_mean = "No")
 
 time_list
 mse_list
@@ -1284,7 +1390,92 @@ for (i in 1:100) {
 # Plot a subset (e.g. 20) for visualization
 matplot(x, t(sine_functions[1:20, ]), type = "l", lty = 1, col = rainbow(20),
         xlab = "x", ylab = "f(x)", main = "Sample of 100 Sine Functions")
-RobustGaSP::
+```
+
+```{r fisher_syn_data}
+sourceCpp("src/demo.cpp")
+m = 50
+set.seed(2001)
+n = 1500
+p = 5
+k = 5
+temp = generate_data(n, p, k, gamma_range, sigma2_range, nugget_range)
+Xo = temp[[1]]
+Yo = temp[[2]]
+maxmin_order <- GpGp::order_maxmin(Xo)
+ordered_sample <- Xo[maxmin_order,]
+ordered_response <- Yo[maxmin_order,]
+
+X_train_ordered <- ordered_sample[1:1000,]
+X_test_ordered <- ordered_sample[1001:1500,]
+Y_train_ordered <- ordered_response[1:1000,]
+Y_test_ordered <- ordered_response[1001:1500,]
+
+# try: train with small m, predict with larger m 
+nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+
+gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+eta = log(1/gamma)
+tau = log(nu)
+
+temp = fisher_scoring(params = c(eta,tau), tau = tau , nugget_est = TRUE, x = X_train_ordered,
+               NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2", alpha = 1.9,
+               trend = matrix(1, nrow = 1000, 1), zero_mean = "No")
+
+
+temp2_inv = solve(temp[[2]])
+temp1_vec = matrix(temp[[1]], byrow = TRUE)
+temp2_inv %*% temp1_vec
+
+temp = neg_vecchia_marginal_log_likelihood_deriv(params = c(gamma, nu), nu = nu, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2",alpha = 1.9, trend = matrix(1,1000, 1),zero_mean = "No")
+
+fisher <- function(ini_param, tau, nugget_est, x, NNmatrix, y, kernel_type, alpha, trend, zero_mean, max_iter = 40, tol = 1e-4){
+  tau = ini_param[length(ini_param)]
+  params = ini_param
+  iter = 0
+  while (iter <= max_iter) {
+    temp = fisher_scoring(params = params, tau = tau , nugget_est = nugget_est, x = x,
+                 NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
+                 trend = trend, zero_mean = zero_mean)
+    update = solve(temp[[2]], matrix(temp[[1]], byrow = TRUE))
+    new_params = params - update
+    
+    gamma = exp(-params[1:(length(params)-1)])
+    nu = exp(params[length(params)])
+    print(paste("Iter ", iter))
+    print(paste("Params", c(gamma, nu)))
+    print(paste("Update", update))
+    print(paste("norm", norm(update, type = "2") ))
+    if (norm(update, type = "2") < tol ){
+      return(new_params)
+    } else{
+      params = new_params
+      iter = iter + 1
+    }
+  }
+}
+start_time <- Sys.time()
+temp = fisher(ini_param = c(eta,tau), tau = tau , nugget_est = TRUE, x = X_train_ordered,
+               NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2", alpha = 1.9,
+               trend = matrix(1, nrow = 1000, 1), zero_mean = "No")
+end_time <- Sys.time()
+end_time - start_time
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = gamma, nu = nu, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), zero_mean = "No")
+
+eta = c(0.028116903, 0.007682817, 0.076552645, 0.004405645, 0.015995200)
+gamma = exp(-eta)
+tau = 0.141721169
+nu = exp(tau)
+
+mse(Y_test_ordered, list[[1]])
+pci(Y_test_ordered, list[[2]], list[[3]])
+lci(list[[2]], list[[3]])
+```
+
+```{r fisher_real_data}
+
 ```
 
 
