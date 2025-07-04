@@ -471,8 +471,8 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
   } else {
     Rcpp::stop("Unknown kernel type.");
   }
+  auto start = high_resolution_clock::now();
   if (nugget_est){
-    auto start = high_resolution_clock::now();
     int p = params.size()-1;
     VectorXd gamma = params.head(p);
     nu = params(p);
@@ -489,6 +489,7 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     
     sum_log_deriv(p) -= 0.5 * 1/kernel_func(x.row(0), x.row(0), gamma, nu, alpha)(0,0);
     // deal with i = 0 case separately since there is no neighbor
+
     for (int i = 1; i < n; ++i){
       int num_neighbors = std::min(i,m);
       VectorXd idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose();
@@ -559,7 +560,9 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       VectorXd ucol = Ucolumn(i_column, idx, i, n);
       matrix_list[p].col(i) = ucol;
     }
-    
+    auto end = high_resolution_clock::now();
+    duration<double> diff = end - start;
+    Rcpp::Rcout << "Deriv with nugget section took " << diff.count() << " seconds.\n";
     if (zero_mean == "Yes"){
       MatrixXd Ut = U.transpose();
       for (int j = 0; j < p+1; ++j){
@@ -623,9 +626,6 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     }
     Rcpp::Rcout << "grad_clip" << std::endl;
     Rcpp::Rcout << grad_clip << std::endl;
-    auto end = high_resolution_clock::now();
-    duration<double> diff = end - start;
-    Rcpp::Rcout << "Deriv with nugget section took " << diff.count() << " seconds.\n";
     return grad_clip;
   } else{
     auto start = high_resolution_clock::now();
@@ -884,7 +884,6 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
       vector<MatrixXd> Qi_Ai_inv_list(n);
       vector<MatrixXd> dXSXr(p+1, MatrixXd::Zero(q,q));
       vector<double> dlogdetr(p+1, 0.0);
-      vector<VectorXi> idx_list(n);
       double logdet = 0.0;
       // deal with i = 0 separetely, only B_i
       
@@ -1008,7 +1007,7 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
         vector<VectorXd> dXSYr_j(p+1, VectorXd::Zero(q));
         
         VectorXd y_j = y.col(j);
-        for (int i = 1; i < n; ++i){
+        for (int i = 0; i < n; ++i){
           if (i == 0){
             VectorXd y_v_i(1);
             y_v_i[0] = y_j[0];
@@ -1078,6 +1077,160 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
   return Rcpp::List::create(loglik, grad, fisher);
 }
 
+// this function return the loglikelihood in the fisher scoring algorithm
+// [[Rcpp::export]]
+double fisher_loglik(const VectorXd params, double tau, const bool nugget_est,
+                    const MatrixXd &x, const MatrixXd &NNmatrix,
+                    const MatrixXd &y,
+                    const String kernel_type, const double alpha, 
+                    const MatrixXd &trend, const String zero_mean = "Yes"){
+  using namespace std::chrono;
+  auto start = high_resolution_clock::now();
+  int k = y.cols();
+  int n = y.rows();
+  int m = NNmatrix.cols() - 1;
+  MatrixXd H = trend;
+  KernelFunc kernel_func;
+  KernelFunc_deriv kernel_func_deriv_gamma_k;
+  if (kernel_type == "pow_exp"){
+    kernel_func = Exp2Sep;
+    kernel_func_deriv_gamma_k = Exp2Sep_deriv_gamma_k;
+  } else if (kernel_type == "matern_3_2"){
+    kernel_func = Matern_3_2_Sep;
+    kernel_func_deriv_gamma_k = Matern_3_2_Sep_deriv_gamma_k;
+  } else if (kernel_type == "matern_5_2"){
+    kernel_func = Matern_5_2_Sep;
+    kernel_func_deriv_gamma_k = Matern_5_2_Sep_deriv_gamma_k;
+  } else {
+    Rcpp::stop("Unknown kernel type.");
+  }
+  double loglik = 0.0;
+  if (nugget_est){
+    int p = params.size()-1;
+    // convert the parameters
+    VectorXd eta = params.head(p);
+    tau = params(p);
+    VectorXd gamma = (-eta).array().exp();
+    double nu = exp(tau);
+    
+    if (zero_mean == "No"){
+      int q = H.cols();
+      MatrixXd XSX = MatrixXd::Zero(q,q);
+      vector<MatrixXd> Ri_Bi_inv_list(n);
+      vector<MatrixXd> Qi_Ai_inv_list(n);
+      vector<MatrixXd> Bi_inv_list(n);
+      vector<MatrixXd> Ai_inv_list(n);
+      
+      double logdet = 0.0;
+      for (int i = 0; i < n; ++i){
+        if (i == 0){
+          MatrixXd v_i = x.row(i);
+          MatrixXd R_i = H.row(i);
+          double B_i = kernel_func(v_i, v_i, gamma, nu, alpha)(0,0);
+          MatrixXd Ri_Bi_inv = (R_i * 1/B_i).transpose();
+          Ri_Bi_inv_list[i] = Ri_Bi_inv;
+          Qi_Ai_inv_list[i] = MatrixXd::Zero(q,1);
+          XSX += Ri_Bi_inv * R_i;
+          
+          MatrixXd Bi_inv(1,1);
+          Bi_inv(0,0) = 1/B_i;
+          
+          Bi_inv_list[i] = Bi_inv;
+          Ai_inv_list[i] = MatrixXd::Zero(1,1);
+          logdet += log(B_i);
+        } else {
+          int num_neighbors = std::min(i, m);
+          MatrixXd v_i(num_neighbors+1, p);
+          v_i.row(0) = x.row(i);
+          MatrixXd R_i(num_neighbors+1, q);
+          R_i.row(0) = H.row(i);
+          VectorXi idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose().cast<int>();
+          for (int j = 0; j < num_neighbors; ++j){
+            v_i.row(j+1) = x.row(idx[j] - 1);
+            R_i.row(j+1) = H.row(idx[j] - 1);
+          }
+          MatrixXd u_i = v_i.block(1, 0, num_neighbors, p);
+          MatrixXd B_i = kernel_func(v_i, v_i, gamma, nu, alpha);
+          // remove the first column and the first row;
+          MatrixXd A_i = B_i.block(1, 1, num_neighbors, num_neighbors);
+          MatrixXd Q_i = R_i.block(1, 0, num_neighbors, q);
+          
+          LLT<MatrixXd> llt_B_i(B_i); 
+          LLT<MatrixXd> llt_A_i(A_i);
+          MatrixXd Ri_Bi_inv = llt_B_i.solve(R_i).transpose();
+          Ri_Bi_inv_list[i] = Ri_Bi_inv;
+          MatrixXd Qi_Ai_inv = llt_A_i.solve(Q_i).transpose();
+          Qi_Ai_inv_list[i] = Qi_Ai_inv;
+          // done with XSX
+          XSX += Ri_Bi_inv * R_i - Qi_Ai_inv * Q_i;
+          
+          MatrixXd LB_i = llt_B_i.matrixL();
+          double logdet_B_i = 2.0 * LB_i.diagonal().array().log().sum();
+          MatrixXd LA_i = llt_A_i.matrixL();
+          double logdet_A_i = 2.0 * LA_i.diagonal().array().log().sum();
+          logdet += logdet_B_i - logdet_A_i;
+          
+          MatrixXd temp_B_i = LB_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
+          MatrixXd Bi_inv = LB_i.transpose().triangularView<Upper>().solve(temp_B_i);
+          
+          MatrixXd temp_A_i = LA_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors, num_neighbors));
+          MatrixXd Ai_inv = LA_i.transpose().triangularView<Upper>().solve(temp_A_i);
+          
+          Bi_inv_list[i] = Bi_inv;
+          Ai_inv_list[i] = Ai_inv;
+          
+        }
+      }
+      
+      double log_sigma = 0.0;
+      LLT<MatrixXd> llt_XSX(XSX);
+      MatrixXd XSX_inv = llt_XSX.solve(MatrixXd::Identity(q, q));
+      
+      for (int j = 0; j < k; ++j){
+        double YSY_j = 0.0;
+        VectorXd XSY_j = VectorXd::Zero(q);
+        VectorXd y_j = y.col(j);
+        for (int i = 0; i < n; ++i){
+          if (i == 0){
+            VectorXd y_v_i(1);
+            y_v_i[0] = y_j[0];
+            VectorXd Bi_inv_y_v_i = Bi_inv_list[i] * y_v_i;
+            YSY_j += y_v_i.dot(Bi_inv_y_v_i);
+            XSY_j += Ri_Bi_inv_list[i] * y_v_i;
+          } else {
+            int num_neighbors = std::min(i, m);
+            VectorXi idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose().cast<int>();
+            // construct yv_i and yu_i
+            VectorXd y_v_i(num_neighbors + 1);
+            y_v_i[0] = y_j[i];
+            for (int s = 0; s < num_neighbors; ++s){
+              y_v_i[s+1] = y_j[idx[s] - 1];
+            }
+            VectorXd y_u_i = y_v_i.tail(num_neighbors);
+            VectorXd Bi_inv_y_v_i = Bi_inv_list[i] * y_v_i;
+            VectorXd Ai_inv_y_u_i = Ai_inv_list[i] * y_u_i;
+            YSY_j += y_v_i.dot(Bi_inv_y_v_i) - y_u_i.dot(Ai_inv_y_u_i);
+            XSY_j += Ri_Bi_inv_list[i] * y_v_i - Qi_Ai_inv_list[i] * y_u_i;
+          }
+        }
+        VectorXd XSX_inv_XSY_j = XSX_inv * XSY_j;
+        double sigma_j = (YSY_j - XSY_j.transpose() * XSX_inv_XSY_j)/n;
+        log_sigma += log(sigma_j);
+      }
+      loglik = - n * k/2.0 * log(2 * pi) - n/2.0 * log_sigma - k / 2.0 * logdet - n * k / 2.0;
+    } else {
+      // if zero_mean = TRUE
+    }
+    
+  } else { // if nugget_est = FALSE
+    
+  }
+  auto end = high_resolution_clock::now();
+  duration<double> diff = end - start;
+  Rcpp::Rcout << "Fisher loglik took " << diff.count() << " seconds.\n";
+  return loglik;
+}
+  
 // [[Rcpp::export]]
 MatrixXd Chol(const MatrixXd &R){
   
