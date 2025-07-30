@@ -15,7 +15,7 @@ const double pi = 3.14159265358979323846;
 
 // [[Rcpp::export]]
 MatrixXd Exp2Sep(const MatrixXd &x1, const MatrixXd &x2, 
-  const VectorXd gamma, const double nu, const double alpha) { 
+  const VectorXd gamma, const double nu, const double alpha, const bool isotropic) { 
   // the input matrix has n rows and p cols
   // the output is the correlation matrix
   int n1 = x1.rows();
@@ -24,14 +24,28 @@ MatrixXd Exp2Sep(const MatrixXd &x1, const MatrixXd &x2,
   if (x1.cols() != x2.cols()){
     stop("dimension of x1 does not match with dimension of x2");
   }
-  if (gamma.size() != p){
+  if (!isotropic && gamma.size() != p){
     stop("length of gamma does not match dimension of x");
   }
+  if (isotropic && gamma.size() != 1){
+    stop("isotropic kernel expects gamma to be a scalar");
+  }
   MatrixXd covmat(n1, n2);
-  VectorXd inv_gamma = gamma.array().inverse().pow(alpha);
+  VectorXd inv_gamma;
+  double inv_gamma_iso;
+  if (!isotropic){
+    inv_gamma = gamma.array().inverse().pow(alpha);
+  } else{
+    inv_gamma_iso = pow(1.0/gamma(0), alpha);
+  }
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double r = ((x1.row(i) - x2.row(j)).array().abs().pow(alpha) * inv_gamma.transpose().array()).sum();
+      double r;
+      if (!isotropic){
+        r = ((x1.row(i) - x2.row(j)).array().abs().pow(alpha) * inv_gamma.transpose().array()).sum();
+      } else{
+        r = pow((x1.row(i)- x2.row(j)).norm(), alpha) * inv_gamma_iso;
+      }
       covmat(i, j) = exp(-r);
     }
   }
@@ -49,7 +63,7 @@ MatrixXd Exp2Sep(const MatrixXd &x1, const MatrixXd &x2,
 
 // [[Rcpp::export]]
 MatrixXd Matern_3_2_Sep(const MatrixXd &x1, const MatrixXd &x2, 
-                 const VectorXd gamma, const double nu, const double alpha) { 
+                 const VectorXd gamma, const double nu, const double alpha, const bool isotropic) { 
   // the input matrix has n rows and p cols
   // the output is the correlation matrix
   int n1 = x1.rows();
@@ -58,18 +72,28 @@ MatrixXd Matern_3_2_Sep(const MatrixXd &x1, const MatrixXd &x2,
     stop("dimension of x1 does not match with dimension of x2");
   }
   int p = x1.cols();
-  if (gamma.size() != p){
+  if (!isotropic && gamma.size() != p){
     stop("length of gamma does not match dimension of x");
+  }
+  if (isotropic && gamma.size() != 1){
+    stop("isotropic kernel expects gamma to be a scalar");
   }
   MatrixXd covmat(n1, n2);
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double r = 1.0;
-      for (int k = 0; k < p; k++){
-        // change to squared value instead of absolute value
-        double d = std::abs(x1(i, k) - x2(j, k));
-        double temp = sqrt(3) * d / gamma(k);
-        r *= (1+ temp) * exp(-temp);
+      double r;
+      if (!isotropic){
+        for (int k = 0; k < p; k++){
+          r = 1.0;
+          // change to squared value instead of absolute value
+          double d = std::abs(x1(i, k) - x2(j, k));
+          double temp = sqrt(3.0) * d / gamma(k);
+          r *= (1.0 + temp) * exp(-temp);
+        }
+      } else{
+        double d = (x1.row(i) - x2.row(j)).norm();
+        double temp = sqrt(3.0) * d / gamma(0);
+        r = (1.0 + temp) * exp(-temp);
       }
       covmat(i,j) = r;
     }
@@ -88,7 +112,7 @@ MatrixXd Matern_3_2_Sep(const MatrixXd &x1, const MatrixXd &x2,
 
 // [[Rcpp::export]]
 MatrixXd Matern_5_2_Sep(const MatrixXd &x1, const MatrixXd &x2, 
-                        const VectorXd gamma, const double nu, const double alpha) { 
+                        const VectorXd gamma, const double nu, const double alpha, const bool isotropic) { 
   // the input matrix has n rows and p cols
   // the output is the correlation matrix
   int n1 = x1.rows();
@@ -97,19 +121,30 @@ MatrixXd Matern_5_2_Sep(const MatrixXd &x1, const MatrixXd &x2,
     stop("dimension of x1 does not match with dimension of x2");
   }
   int p = x1.cols();
-  if (gamma.size() != p){
+  if (!isotropic && gamma.size() != p){
     stop("length of gamma does not match dimension of x");
+  }
+  if (isotropic && gamma.size() != 1){
+    stop("isotropic kernel expects gamma to be a scalar");
   }
   MatrixXd covmat(n1, n2);
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double r = 1.0;
-      for (int k = 0; k < p; k++){
-        // change to squared value instead of absolute value
-        double d = std::abs(x1(i, k) - x2(j, k));
-        double temp1 = sqrt(5) * d / gamma(k);
-        double temp2 = pow(temp1, 2) / 3;
-        r *= (1+ temp1 + temp2) * exp(-temp1);
+      double r;
+      if (!isotropic){
+        r = 1.0;
+        for (int k = 0; k < p; k++){
+          // change to squared value instead of absolute value
+          double d = std::abs(x1(i, k) - x2(j, k));
+          double temp1 = sqrt(5.0) * d / gamma(k);
+          double temp2 = pow(temp1, 2) / 3.0;
+          r *= (1.0 + temp1 + temp2) * exp(-temp1);
+        }
+      } else{
+        double d = (x1.row(i) - x2.row(j)).norm();
+        double temp1 = sqrt(5.0) * d / gamma(0);
+        double temp2 = pow(temp1, 2) / 3.0;
+        r = (1.0 + temp1 + temp2) * exp(-temp1);
       }
       covmat(i,j) = r;
     }
@@ -129,26 +164,41 @@ MatrixXd Matern_5_2_Sep(const MatrixXd &x1, const MatrixXd &x2,
 // [[Rcpp::export]]
 MatrixXd Exp2Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2, 
                const VectorXd gamma, const double nu, 
-               const double alpha, const int k){
+               const double alpha, const int k, const bool isotropic){
   // the output is the derivative of the correlation matrix 
   // with respect to the kth of gamma
   int n1 = x1.rows();
   int n2 = x2.rows();
+  int p = x1.cols();
   if (x1.cols() != x2.cols()){
     stop("dimension of x1 does not match with dimension of x2");
   }
-  if (gamma.size() != x1.cols()){
+  if (!isotropic && gamma.size() != p) {
     stop("length of gamma does not match dimension of x");
+  }
+  
+  if (isotropic && gamma.size() != 1) {
+    stop("isotropic kernel expects gamma to be a scalar");
+  }
+  
+  if (isotropic && k != 0) {
+    stop("in isotropic mode, derivative is only defined for gamma index 0");
   }
   MatrixXd res(n1,n2);
   // first construct the correlation matrix
-  MatrixXd covmat = Exp2Sep(x1, x2, gamma, nu, alpha);
+  MatrixXd covmat = Exp2Sep(x1, x2, gamma, nu, alpha, isotropic);
   // for each gamma k, calculate the matrix derivative
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double d = abs(x1(i,k)-x2(j,k));
-      double extra = alpha * 
-        pow(gamma(k), - alpha - 1) * pow(d, alpha);
+      double extra;
+      if (!isotropic){
+        double d = abs(x1(i,k)-x2(j,k));
+        extra = alpha * 
+          pow(gamma(k), - alpha - 1.0) * pow(d, alpha);
+      } else{
+        double d = (x1.row(i) - x2.row(j)).norm();
+        extra = alpha * pow(gamma(0), -alpha - 1.0) * pow(d, alpha);
+      }
        res(i, j) = covmat(i,j) * extra;
      }
   }
@@ -158,27 +208,45 @@ MatrixXd Exp2Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2,
 // [[Rcpp::export]]
 MatrixXd Matern_3_2_Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2, 
                                const VectorXd gamma, const double nu, 
-                               const double alpha, const int k){
+                               const double alpha, const int k, const bool isotropic){
   // the output is the derivative of the correlation matrix 
   // with respect to the kth of gamma
   int n1 = x1.rows();
   int n2 = x2.rows();
+  int p = x1.cols();
   if (x1.cols() != x2.cols()){
     stop("dimension of x1 does not match with dimension of x2");
   }
-  if (gamma.size() != x1.cols()){
+  if (!isotropic && gamma.size() != p) {
     stop("length of gamma does not match dimension of x");
+  }
+  
+  if (isotropic && gamma.size() != 1) {
+    stop("isotropic kernel expects gamma to be a scalar");
+  }
+  
+  if (isotropic && k != 0) {
+    stop("in isotropic mode, derivative is only defined for gamma index 0");
   }
   MatrixXd res(n1,n2);
   // first construct the correlation matrix
-  MatrixXd covmat = Matern_3_2_Sep(x1, x2, gamma, nu, alpha);
+  MatrixXd covmat = Matern_3_2_Sep(x1, x2, gamma, nu, alpha, isotropic);
   // for each gamma k, calculate the matrix derivative
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double d = abs(x1(i,k)-x2(j,k));
-      double temp1 = 1 + sqrt(3) * d / gamma(k);
-      double temp2 = 3 * pow(d, 2) / pow(gamma(k), 3);
-      res(i, j) = covmat(i,j) * temp2 / temp1;
+      double factor;
+      if (!isotropic){
+        double d = abs(x1(i,k)-x2(j,k));
+        double temp1 = 1.0 + sqrt(3.0) * d / gamma(k);
+        double temp2 = 3.0 * pow(d, 2) / pow(gamma(k), 3);
+        factor = temp2 / temp1;
+      } else{
+        double d = (x1.row(i)-x2.row(j)).norm();
+        double temp1 = 1.0 + sqrt(3.0) * d / gamma(0);
+        double temp2 = 3.0 * pow(d, 2) / pow(gamma(0), 3);
+        factor = temp2 / temp1;
+      }
+      res(i, j) = covmat(i,j) * factor;
     }
   }
   return res;
@@ -187,27 +255,45 @@ MatrixXd Matern_3_2_Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2,
 // [[Rcpp::export]]
 MatrixXd Matern_5_2_Sep_deriv_gamma_k(const MatrixXd &x1, const MatrixXd &x2, 
                                       const VectorXd gamma, const double nu, 
-                                      const double alpha, const int k){
+                                      const double alpha, const int k, const bool isotropic){
   // the output is the derivative of the correlation matrix 
   // with respect to the kth of gamma
   int n1 = x1.rows();
   int n2 = x2.rows();
+  int p = x1.cols();
   if (x1.cols() != x2.cols()){
     stop("dimension of x1 does not match with dimension of x2");
   }
-  if (gamma.size() != x1.cols()){
+  if (!isotropic && gamma.size() != p) {
     stop("length of gamma does not match dimension of x");
+  }
+  
+  if (isotropic && gamma.size() != 1) {
+    stop("isotropic kernel expects gamma to be a scalar");
+  }
+  
+  if (isotropic && k != 0) {
+    stop("in isotropic mode, derivative is only defined for gamma index 0");
   }
   MatrixXd res(n1,n2);
   // first construct the correlation matrix
-  MatrixXd covmat = Matern_5_2_Sep(x1, x2, gamma, nu, alpha);
+  MatrixXd covmat = Matern_5_2_Sep(x1, x2, gamma, nu, alpha, isotropic);
   // for each gamma k, calculate the matrix derivative
   for (int i = 0; i < n1; i++) {
     for (int j = 0; j < n2; j++) {
-      double d = abs(x1(i,k)-x2(j,k));
-      double temp1 = 1 + sqrt(5) * d / gamma(k) + 5 * pow(d,2)/(3*pow(gamma(k), 2));
-      double temp2 = 5 * sqrt(5) * pow(d, 3) / (3 * pow(gamma(k), 4)) + 5 * pow(d, 2)/ (3 * pow(gamma(k), 3));
-      res(i, j) = covmat(i,j) * temp2 / temp1;
+      double factor;
+      if (!isotropic){
+        double d = abs(x1(i,k)-x2(j,k));
+        double temp1 = 1.0 + sqrt(5.0) * d / gamma(k) + 5.0 * pow(d,2)/(3.0*pow(gamma(k), 2));
+        double temp2 = 5.0 * sqrt(5.0) * pow(d, 3) / (3.0 * pow(gamma(k), 4)) + 5.0 * pow(d, 2)/ (3 * pow(gamma(k), 3));
+        factor = temp2 / temp1;
+      } else{
+        double d  = (x1.row(i)-x2.row(j)).norm();
+        double temp1 = 1.0 + sqrt(5) * d / gamma(0) + 5 * pow(d,2)/(3*pow(gamma(0), 2));
+        double temp2 = 5.0 * sqrt(5.0) * pow(d, 3) / (3.0 * pow(gamma(0), 4)) + 5.0 * pow(d, 2)/ (3 * pow(gamma(0), 3));
+        factor = temp2 / temp1;
+      }
+      res(i, j) = covmat(i,j) * factor;
     }
   }
   return res;
@@ -222,11 +308,13 @@ MatrixXd R_inv_y(const MatrixXd &R, const VectorXd &y){
   
   return res;
 }
+using KernelFunc = std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double, bool)>;
+using KernelFunc_deriv = std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double, int, bool)>;
 
 // [[Rcpp::export]]
 // Given a vector of the neighbor indices, return the ith column of the U
 Rcpp::List Uentries(const MatrixXd &x, const VectorXd &idx, const int i, const VectorXd gamma, 
-             const double nu, const string kernel_type, const double alpha) {
+             const double nu, const string kernel_type, const double alpha, const bool isotropic) {
   //x is the ordered input matrix, idx is a vector contains all neighbor indices of ith element
   //i indicates the ith element 
   
@@ -243,7 +331,8 @@ Rcpp::List Uentries(const MatrixXd &x, const VectorXd &idx, const int i, const V
   // create a place holder for the Uentries
   VectorXd i_column(m+1);
   
-  std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double)> kernel_func;
+  // std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double, bool)> kernel_func;
+  KernelFunc kernel_func;
   
   if (kernel_type == "pow_exp"){
     kernel_func = Exp2Sep;
@@ -253,12 +342,12 @@ Rcpp::List Uentries(const MatrixXd &x, const VectorXd &idx, const int i, const V
     kernel_func = Matern_5_2_Sep;
   }
   MatrixXd Sigma_cc = kernel_func(selected_neighbors,selected_neighbors, 
-                     gamma, nu, alpha);
+                     gamma, nu, alpha, isotropic);
   MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu,
-                     alpha);
+                     alpha, isotropic);
   MatrixXd B_i = R_inv_y(Sigma_cc, Sigma_ci).transpose();
   MatrixXd D_i = kernel_func(i_element, i_element, gamma, nu,
-                   alpha) - B_i * Sigma_ci;
+                   alpha, isotropic) - B_i * Sigma_ci;
   // D_i_half_inv is the diagonal term
   double D_i_half_inv = 1/sqrt(D_i(0,0));
   i_column.head(m) = -D_i_half_inv * B_i;
@@ -285,7 +374,7 @@ VectorXd Ucolumn(const VectorXd &i_column, const VectorXd &idx, const int &i,
 // [[Rcpp::export]]
 Rcpp::List Umatrix(const MatrixXd &x, const MatrixXd &NNmatrix, 
                  const VectorXd gamma, const double nu, const string kernel_type,
-                     const double alpha) {
+                     const double alpha, const bool isotropic) {
   int n = x.rows();
   // the first column of the NNmatrix is not useful
   int m = NNmatrix.cols() - 1;
@@ -295,11 +384,11 @@ Rcpp::List Umatrix(const MatrixXd &x, const MatrixXd &NNmatrix,
   // set the first diagonal term since it has no neighbor
   double diag_11;
   if (kernel_type == "pow_exp"){
-     diag_11 = 1/sqrt(Exp2Sep(x.row(0),x.row(0), gamma, nu, alpha)(0,0));
+     diag_11 = 1/sqrt(Exp2Sep(x.row(0),x.row(0), gamma, nu, alpha, isotropic)(0,0));
   } else if (kernel_type == "matern_3_2"){
-     diag_11 = 1/sqrt(Matern_3_2_Sep(x.row(0),x.row(0), gamma, nu, alpha)(0,0));
+     diag_11 = 1/sqrt(Matern_3_2_Sep(x.row(0),x.row(0), gamma, nu, alpha, isotropic)(0,0));
   } else if (kernel_type == "matern_5_2"){
-     diag_11 = 1/sqrt(Matern_5_2_Sep(x.row(0),x.row(0), gamma, nu, alpha)(0,0));
+     diag_11 = 1/sqrt(Matern_5_2_Sep(x.row(0),x.row(0), gamma, nu, alpha, isotropic)(0,0));
   } else {
     Rcpp::stop("Unknown kernel type.");
   }
@@ -311,7 +400,7 @@ Rcpp::List Umatrix(const MatrixXd &x, const MatrixXd &NNmatrix,
     VectorXd idx;
     if (i < m) {
       idx = NNmatrix.block(i, 1, 1, i).transpose();
-      List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha);
+      List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha, isotropic);
       VectorXd icolumn = temp[0];
       double diag = temp[1];
       VectorXd ucol = Ucolumn(icolumn, idx, i, n);
@@ -319,73 +408,13 @@ Rcpp::List Umatrix(const MatrixXd &x, const MatrixXd &NNmatrix,
       sum_log_diag_U += log(diag);
     } else {
       idx = NNmatrix.row(i).segment(1, m);
-      List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha);
+      List temp = Uentries(x, idx, i, gamma, nu, kernel_type, alpha, isotropic);
       VectorXd icolumn = temp[0];
       double diag = temp[1];
       VectorXd ucol = Ucolumn(icolumn, idx, i, n);
       U.col(i) = ucol;
       sum_log_diag_U += log(diag);
     }
-  }
-  return Rcpp::List::create(U, sum_log_diag_U);
-}
-
-using KernelFunc = std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double)>;
-using KernelFunc_deriv = std::function<MatrixXd(const MatrixXd&, const MatrixXd&, const VectorXd&, double, double, int)>;
-
-// [[Rcpp::export]]
-Rcpp::List Umatrix1(const MatrixXd &x, const MatrixXd &NNmatrix, 
-                    const VectorXd gamma, const double nu, const string kernel_type,
-                    const double alpha) {
-  int n = x.rows();
-  int m = NNmatrix.cols() - 1;
-  MatrixXd U = MatrixXd::Zero(n, n);
-  double sum_log_diag_U = 0;
-  
-  // Select kernel function once
-  KernelFunc kernel_func;
-  if (kernel_type == "pow_exp") {
-    kernel_func = Exp2Sep;
-  } else if (kernel_type == "matern_3_2") {
-    kernel_func = Matern_3_2_Sep;
-  } else if (kernel_type == "matern_5_2") {
-    kernel_func = Matern_5_2_Sep;
-  } else {
-    Rcpp::stop("Unknown kernel type.");
-  }
-  
-  // Precompute diag_11 once
-  double diag_11 = 1.0 / sqrt(kernel_func(x.row(0), x.row(0), gamma, nu, alpha)(0,0));
-  U(0, 0) = diag_11;
-  sum_log_diag_U += std::log(diag_11);
-  
-  for (int i = 1; i < n; ++i) {
-    int num_neighbors = std::min(i, m);
-    VectorXd idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose();
-    
-    MatrixXd selected_neighbors(num_neighbors, x.cols());
-    for (int j = 0; j < num_neighbors; ++j){
-      selected_neighbors.row(j) = x.row(idx[j] - 1);
-    }
-    
-    MatrixXd i_element = x.row(i);
-    MatrixXd Sigma_cc = kernel_func(selected_neighbors, selected_neighbors, gamma, nu, alpha);
-    MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu, alpha);
-    MatrixXd B_i = R_inv_y(Sigma_cc, Sigma_ci).transpose();
-    MatrixXd D_i = kernel_func(i_element, i_element, gamma, nu, alpha) - B_i * Sigma_ci;
-    double D_i_half_inv = 1.0 / sqrt(D_i(0, 0));
-    
-    VectorXd i_column(num_neighbors + 1);
-    i_column.head(num_neighbors) = -D_i_half_inv * B_i;
-    i_column(num_neighbors) = D_i_half_inv;
-    
-    // Fast Ucol insert
-    U(i, i) = D_i_half_inv;
-    for (int j = 0; j < num_neighbors; ++j) {
-      U(static_cast<int>(idx[j]) - 1, i) = i_column[j];
-    }
-    
-    sum_log_diag_U += std::log(D_i_half_inv);
   }
   return Rcpp::List::create(U, sum_log_diag_U);
 }
@@ -394,49 +423,47 @@ Rcpp::List Umatrix1(const MatrixXd &x, const MatrixXd &NNmatrix,
 double neg_vecchia_marginal_log_likelihood(const VectorXd params, double nu, const bool nugget_est, 
                                            const MatrixXd &x, const MatrixXd &NNmatrix, const MatrixXd &y,
                                            const String kernel_type, const double alpha, 
-                                           const MatrixXd& trend, const String zero_mean = "Yes"){
+                                           const MatrixXd& trend, const bool isotropic, const String zero_mean = "Yes"){
   // y is a nxk matrix
   int k = y.cols();
   int n = y.rows();
   VectorXd gamma;
   if (nugget_est){
-    gamma = params.head(params.size()-1);
-    nu = params(params.size()-1);
-  } else{
-    gamma = params;
+      gamma = params.head(params.size()-1);
+      nu = params(params.size()-1);
+  }else{
+      gamma = params;
   }
-  List temp = Umatrix(x, NNmatrix, gamma, nu, kernel_type, alpha);
+  List temp = Umatrix(x, NNmatrix, gamma, nu, kernel_type, alpha, isotropic);
   MatrixXd U = temp[0];
   MatrixXd UUt = U * U.transpose();
   double res = 0.0;
   double sum_log_diag_U = temp[1];
   if (zero_mean == "Yes"){
-    for (int i = 0; i < k; ++i){
-      res += log(y.col(i).transpose() * UUt * y.col(i));
-    }
-    res *= -n / 2.0;
-    res += k * sum_log_diag_U;
+    MatrixXd Uy = UUt * y;
+    VectorXd temp = (y.array() * Uy.array()).colwise().sum();
+    double sum_log_temp = temp.array().log().sum();
+    res = -n / 2.0 * sum_log_temp + k * sum_log_diag_U;
   } else{
     int q = trend.cols();
     MatrixXd HtUUt = trend.transpose() * UUt;
     MatrixXd N = HtUUt * trend;
     LLT<MatrixXd> llt(N);
-    MatrixXd N_inv_H_t_UU_t = llt.solve(HtUUt);
+    MatrixXd N_inv_HtUUt = llt.solve(HtUUt);
     MatrixXd L = llt.matrixL();
     double N_log_det = L.diagonal().array().log().matrix().sum();
-    for (int j = 0; j < k; ++j) {
-      MatrixXd y_j = y.col(j);
-      MatrixXd temp = trend * (N_inv_H_t_UU_t * y_j);
-      MatrixXd Qy_j = UUt * (y_j - temp);
-      res += log((y_j.transpose() * Qy_j)(0,0));
-    }
-    // delete by 2.0 but not 2
-    res *= -(n-q)/2.0;
-    res += k * sum_log_diag_U;
-    res -= k * N_log_det;
+    MatrixXd temp_y1 = trend * (N_inv_HtUUt * y);
+    MatrixXd temp_y2 = UUt * (y - temp_y1);
+    VectorXd temp = (y.array() * temp_y2.array()).colwise().sum();
+    double log_sum = temp.array().log().sum();
+    // for (int j = 0; j < k; ++j) {
+    //   MatrixXd y_j = y.col(j);
+    //   MatrixXd temp = trend * (N_inv_H_t_UU_t * y_j);
+    //   MatrixXd Qy_j = UUt * (y_j - temp);
+    //   res += log((y_j.transpose() * Qy_j)(0,0));
+    // }
+    res = -(n-q)/2.0 * log_sum + k * sum_log_diag_U - k * N_log_det;
   }
-  Rcpp::Rcout << "params" << std::endl;
-  Rcpp::Rcout << params << std::endl;
   return -res;
 }
 
@@ -446,12 +473,13 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
                                                    const MatrixXd &x, const MatrixXd &NNmatrix,
                                                    const MatrixXd &y,
                                                    const String kernel_type, const double alpha, 
-                                                   const MatrixXd &trend, const String zero_mean = "Yes"){
+                                                   const MatrixXd &trend, const bool isotropic, 
+                                                   const String zero_mean = "Yes"){
   // if nugget_est = TRUE, params should contain gamma and nu, and use the nu in params
   // if nuggest_est = FALSE, params should contain only gamma, and use the nu as given.
   // y is n * k 
   using namespace std::chrono;
-  
+  auto start = high_resolution_clock::now();
   int k = y.cols();
   int n = y.rows();
   int m = NNmatrix.cols() - 1;
@@ -471,12 +499,11 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
   } else {
     Rcpp::stop("Unknown kernel type.");
   }
-  auto start = high_resolution_clock::now();
   if (nugget_est){
     int p = params.size()-1;
     VectorXd gamma = params.head(p);
     nu = params(p);
-    U(0,0) = 1/sqrt(kernel_func(x.row(0),x.row(0), gamma, nu, alpha)(0,0));
+    U(0,0) = 1/sqrt(kernel_func(x.row(0),x.row(0), gamma, nu, alpha, isotropic)(0,0));
   
     VectorXd grad = VectorXd::Zero(p+1);
     VectorXd sum_log_deriv = VectorXd::Zero(p+1);
@@ -484,12 +511,11 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     // a list of matrix to store dU/dgamma_k and dU/dnu 
     std::vector<MatrixXd> matrix_list(p+1, MatrixXd::Zero(n, n));
     // first set the (1,1) element of dU/dnu
-    matrix_list[p](0,0) = -0.5 * pow(kernel_func(x.row(0), x.row(0), gamma, nu, alpha)(0,0), -1.5);
+    matrix_list[p](0,0) = -0.5 * pow(kernel_func(x.row(0), x.row(0), gamma, nu, alpha, isotropic)(0,0), -1.5);
     // the (1,1) element of du/dgamma is 0
     
-    sum_log_deriv(p) -= 0.5 * 1/kernel_func(x.row(0), x.row(0), gamma, nu, alpha)(0,0);
+    sum_log_deriv(p) -= 0.5 * 1/kernel_func(x.row(0), x.row(0), gamma, nu, alpha, isotropic)(0,0);
     // deal with i = 0 case separately since there is no neighbor
-
     for (int i = 1; i < n; ++i){
       int num_neighbors = std::min(i,m);
       VectorXd idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose();
@@ -500,12 +526,12 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       
       // first calculate the gradient of gamma
       MatrixXd i_element = x.row(i);
-      MatrixXd Sigma_cc = kernel_func(selected_neighbors, selected_neighbors, gamma, nu, alpha);
-      MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu, alpha);
+      MatrixXd Sigma_cc = kernel_func(selected_neighbors, selected_neighbors, gamma, nu, alpha, isotropic);
+      MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu, alpha, isotropic);
       MatrixXd B_i_t = R_inv_y(Sigma_cc, Sigma_ci);
       MatrixXd B_i = B_i_t.transpose();
       MatrixXd D_i = kernel_func(i_element, i_element, gamma, nu,
-                             alpha) - B_i * Sigma_ci;
+                             alpha, isotropic) - B_i * Sigma_ci;
       // this is 1/sigma
       double D_i_half_inv = 1/sqrt(D_i(0,0));
       double D_i_half_inv2 = D_i_half_inv * D_i_half_inv;
@@ -521,8 +547,8 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
         U(static_cast<int>(idx[j]) - 1, i) = i_column[j];
       }
       for (int j = 0; j < p; ++j){
-        MatrixXd Sigma_ci_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, i_element, gamma, nu, alpha, j);
-        MatrixXd Sigma_cc_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, selected_neighbors, gamma, nu, alpha, j);
+        MatrixXd Sigma_ci_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, i_element, gamma, nu, alpha, j, isotropic);
+        MatrixXd Sigma_cc_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, selected_neighbors, gamma, nu, alpha, j, isotropic);
         double Sigma_ci_deriv_B_i_t = (Sigma_ci_deriv_gamma_j.transpose() * B_i_t)(0,0);
         double A_j = 2 * Sigma_ci_deriv_B_i_t - (B_i * (Sigma_cc_deriv_gamma_j * B_i_t))(0,0);
         // this finishes the first part
@@ -560,60 +586,67 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       VectorXd ucol = Ucolumn(i_column, idx, i, n);
       matrix_list[p].col(i) = ucol;
     }
-    auto end = high_resolution_clock::now();
-    duration<double> diff = end - start;
-    Rcpp::Rcout << "Deriv with nugget section took " << diff.count() << " seconds.\n";
     if (zero_mean == "Yes"){
       MatrixXd Ut = U.transpose();
+      MatrixXd UtY = Ut * y;
+      MatrixXd UUtY = U * UtY;
+      VectorXd temp3_vec = (y.array() * UUtY.array()).colwise().sum();
       for (int j = 0; j < p+1; ++j){
-        grad(j) -= k * sum_log_deriv(j);
-      }
-      for (int z = 0; z < k; ++z){
-        VectorXd y_z = y.col(z);
-        VectorXd Ut_y_z = Ut * y_z;
-        VectorXd UUt_y_z = U * Ut_y_z;
-        double temp3 =  y_z.dot(UUt_y_z);
-        for (int j = 0; j < p+1; ++j){
-          double temp4 = y_z.dot(matrix_list[j] * Ut_y_z);
-          grad(j) += n * 1/temp3 * temp4;
+          grad(j) -= k * sum_log_deriv(j);
+          MatrixXd MjUtY = matrix_list[j] * UtY;
+          VectorXd temp4_vec = (y.array() * MjUtY.array()).colwise().sum();
+          grad(j) += (n * (temp4_vec.array()/temp3_vec.array())).sum();
         }
-      }
     } else{
       int q = H.cols();
       MatrixXd Ut = U.transpose();
+      MatrixXd UUt = U * Ut;
       MatrixXd UtH = Ut*H;
-      MatrixXd UUtH = U * UtH;
+      MatrixXd UUtH = UUt * H;
       MatrixXd Ht = H.transpose();
       MatrixXd N = Ht * UUtH;
       LLT<MatrixXd> llt(N);
       MatrixXd N_inv = llt.solve(MatrixXd::Identity(q, q));
-      MatrixXd N_inv_Ht = N_inv * Ht;
-      MatrixXd H_N_inv_Ht = H * N_inv * Ht;
+      MatrixXd H_N_inv_Ht = H * (N_inv * Ht);
       
+      MatrixXd UtY = Ut * y;
+      MatrixXd UUtY = U * UtY;
+      MatrixXd HY = H_N_inv_Ht * UUtY;
+      MatrixXd UtHY = Ut * HY;
+      MatrixXd QY = UUtY - U * UtHY;
+      VectorXd temp5_vec = (y.array() * QY.array()).colwise().sum();
       for (int j = 0; j < p+1; ++j){
         grad(j) -= k * sum_log_deriv(j);
         MatrixXd MH = matrix_list[j] * UtH;
         MatrixXd HtMH = Ht * MH;
         grad(j) += k * (N_inv * HtMH).diagonal().sum();
+        
+        MatrixXd first_term = matrix_list[j] * UtY;
+        MatrixXd second_term = matrix_list[j] * UtHY;
+        MatrixXd combined = H_N_inv_Ht * (second_term - first_term);
+        MatrixXd third_fourth = UUt * combined;
+        MatrixXd QjY = first_term - second_term + third_fourth;
+        VectorXd temp6_vec = (y.array() * QjY.array()).colwise().sum();
+        grad(j) += ((n-q) * (temp6_vec.array()/temp5_vec.array())).sum();
       }
-      for (int z = 0; z < k; ++z){
-        VectorXd y_z = y.col(z);
-        MatrixXd Ut_y_z = Ut * y_z;
-        MatrixXd UUt_y_z = U * Ut_y_z;
-        // Q1 = Ut_H_N_inv_Ht_UUt_y_z
-        MatrixXd Q1 = Ut * (H_N_inv_Ht * UUt_y_z);
-        VectorXd Qy_z = UUt_y_z - U * Q1;
-        double temp5 = y_z.dot(Qy_z);
-        for (int j = 0; j < p+1; ++j){
-          MatrixXd first_term = matrix_list[j] * Ut_y_z;
-          MatrixXd second_term = matrix_list[j] * Q1;
-          MatrixXd third_term = U * (Ut * (H_N_inv_Ht * second_term));
-          MatrixXd fourth_term = U * (Ut * (H_N_inv_Ht * first_term));
-          VectorXd Qj_y_z = first_term - second_term + third_term - fourth_term;
-          double temp6 = y_z.dot(Qj_y_z);
-          grad(j) += (n-q) * 1/temp5 * temp6;
-        }
-      }
+      // for (int z = 0; z < k; ++z){
+      //   VectorXd y_z = y.col(z);
+      //   MatrixXd Ut_y_z = Ut * y_z;
+      //   MatrixXd UUt_y_z = U * Ut_y_z;
+      //   // Q1 = Ut_H_N_inv_Ht_UUt_y_z
+      //   MatrixXd Q1 = Ut * (H_N_inv_Ht * UUt_y_z);
+      //   VectorXd Qy_z = UUt_y_z - U * Q1;
+      //   double temp5 = y_z.dot(Qy_z);
+      //   for (int j = 0; j < p+1; ++j){
+      //     MatrixXd first_term = matrix_list[j] * Ut_y_z;
+      //     MatrixXd second_term = matrix_list[j] * Q1;
+      //     MatrixXd third_term = U * (Ut * (H_N_inv_Ht * second_term));
+      //     MatrixXd fourth_term = U * (Ut * (H_N_inv_Ht * first_term));
+      //     VectorXd Qj_y_z = first_term - second_term + third_term - fourth_term;
+      //     double temp6 = y_z.dot(Qj_y_z);
+      //     grad(j) += (n-q) * 1/temp5 * temp6;
+      //   }
+      // }
     }
     // clip the gradient
     VectorXd grad_clip(p+1);
@@ -624,6 +657,9 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
         grad_clip(j) = grad(j);
       }
     }
+    auto end = high_resolution_clock::now();
+    duration<double> diff = end - start;
+    Rcpp::Rcout << "Deriv with nugget section took " << diff.count() << " seconds.\n";
     Rcpp::Rcout << "grad_clip" << std::endl;
     Rcpp::Rcout << grad_clip << std::endl;
     return grad_clip;
@@ -631,7 +667,7 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
     auto start = high_resolution_clock::now();
     int p = params.size();
     VectorXd gamma = params;
-    U(0,0) = 1/sqrt(kernel_func(x.row(0),x.row(0), gamma, nu, alpha)(0,0));
+    U(0,0) = 1/sqrt(kernel_func(x.row(0),x.row(0), gamma, nu, alpha, isotropic)(0,0));
     
     VectorXd grad = VectorXd::Zero(p);
     VectorXd sum_log_deriv = VectorXd::Zero(p);
@@ -648,12 +684,12 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       
       // first calculate the gradient of gamma
       MatrixXd i_element = x.row(i);
-      MatrixXd Sigma_cc = kernel_func(selected_neighbors, selected_neighbors, gamma, nu, alpha);
-      MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu, alpha);
+      MatrixXd Sigma_cc = kernel_func(selected_neighbors, selected_neighbors, gamma, nu, alpha, isotropic);
+      MatrixXd Sigma_ci = kernel_func(selected_neighbors, i_element, gamma, nu, alpha, isotropic);
       MatrixXd B_i_t = R_inv_y(Sigma_cc, Sigma_ci);
       MatrixXd B_i = B_i_t.transpose();
       MatrixXd D_i = kernel_func(i_element, i_element, gamma, nu,
-                             alpha) - B_i * Sigma_ci;
+                             alpha, isotropic) - B_i * Sigma_ci;
       // this is 1/sigma
       double D_i_half_inv = 1/sqrt(D_i(0,0));
       double D_i_half_inv2 = D_i_half_inv * D_i_half_inv;
@@ -670,8 +706,8 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       }
       
       for (int j = 0; j < p; ++j){
-        MatrixXd Sigma_ci_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, i_element, gamma, nu, alpha, j);
-        MatrixXd Sigma_cc_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, selected_neighbors, gamma, nu, alpha, j);
+        MatrixXd Sigma_ci_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, i_element, gamma, nu, alpha, j, isotropic);
+        MatrixXd Sigma_cc_deriv_gamma_j = kernel_func_deriv_gamma_k(selected_neighbors, selected_neighbors, gamma, nu, alpha, j, isotropic);
         double Sigma_ci_deriv_B_i_t = (Sigma_ci_deriv_gamma_j.transpose() * B_i_t)(0,0);
         double A_j = 2* Sigma_ci_deriv_B_i_t - (B_i * Sigma_cc_deriv_gamma_j * B_i_t)(0,0);
         // this finishes the first part
@@ -696,57 +732,48 @@ VectorXd neg_vecchia_marginal_log_likelihood_deriv(const VectorXd params, double
       }
     }
     // finish the gradient of gamma
-    
     if (zero_mean == "Yes"){
       MatrixXd Ut = U.transpose();
+      MatrixXd UtY = Ut * y;
+      MatrixXd UUtY = U * UtY;
+      VectorXd temp3_vec = (y.array() * UUtY.array()).colwise().sum();
       for (int j = 0; j < p; ++j){
         grad(j) -= k * sum_log_deriv(j);
-      }
-      for (int z = 0; z < k; ++z){
-        VectorXd y_z = y.col(z);
-        VectorXd Ut_y_z = Ut * y_z;
-        VectorXd UUt_y_z = U * Ut_y_z;
-        double temp3 =  y_z.dot(UUt_y_z);
-        for (int j = 0; j < p; ++j){
-          double temp4 = y_z.dot(matrix_list[j] * Ut_y_z);
-          grad(j) += n * 1/temp3 * temp4;
-        }
+        MatrixXd MjUtY = matrix_list[j] * UtY;
+        VectorXd temp4_vec = (y.array() * MjUtY.array()).colwise().sum();
+        grad(j) += (n * (temp4_vec.array()/temp3_vec.array())).sum();
       }
     } else{
       int q = H.cols();
       MatrixXd Ut = U.transpose();
+      MatrixXd UUt = U * Ut;
       MatrixXd UtH = Ut*H;
-      MatrixXd UUtH = U * UtH;
+      MatrixXd UUtH = UUt * H;
       MatrixXd Ht = H.transpose();
       MatrixXd N = Ht * UUtH;
       LLT<MatrixXd> llt(N);
       MatrixXd N_inv = llt.solve(MatrixXd::Identity(q, q));
-      MatrixXd N_inv_Ht = N_inv * Ht;
-      MatrixXd H_N_inv_Ht = H * N_inv * Ht;
+      MatrixXd H_N_inv_Ht = H * (N_inv * Ht);
       
+      MatrixXd UtY = Ut * y;
+      MatrixXd UUtY = U * UtY;
+      MatrixXd HY = H_N_inv_Ht * UUtY;
+      MatrixXd UtHY = Ut * HY;
+      MatrixXd QY = UUtY - U * UtHY;
+      VectorXd temp5_vec = (y.array() * QY.array()).colwise().sum();
       for (int j = 0; j < p; ++j){
         grad(j) -= k * sum_log_deriv(j);
         MatrixXd MH = matrix_list[j] * UtH;
         MatrixXd HtMH = Ht * MH;
         grad(j) += k * (N_inv * HtMH).diagonal().sum();
-      }
-      for (int z = 0; z < k; ++z){
-        VectorXd y_z = y.col(z);
-        MatrixXd Ut_y_z = Ut * y_z;
-        MatrixXd UUt_y_z = U * Ut_y_z;
-        // Q1 = Ut_H_N_inv_Ht_UUt_y_z
-        MatrixXd Q1 = Ut * (H_N_inv_Ht * UUt_y_z);
-        VectorXd Qy_z = UUt_y_z - U * Q1;
-        double temp5 = y_z.dot(Qy_z);
-        for (int j = 0; j < p; ++j){
-          MatrixXd first_term = matrix_list[j] * Ut_y_z;
-          MatrixXd second_term = matrix_list[j] * Q1;
-          MatrixXd third_term = U * (Ut * (H_N_inv_Ht * second_term));
-          MatrixXd fourth_term = U * (Ut * (H_N_inv_Ht * first_term));
-          VectorXd Qj_y_z = first_term - second_term + third_term - fourth_term;
-          double temp6 = y_z.dot(Qj_y_z);
-          grad(j) += (n-q) * 1/temp5 * temp6;
-        }
+        
+        MatrixXd first_term = matrix_list[j] * UtY;
+        MatrixXd second_term = matrix_list[j] * UtHY;
+        MatrixXd combined = H_N_inv_Ht * (second_term - first_term);
+        MatrixXd third_fourth = UUt * combined;
+        MatrixXd QjY = first_term - second_term + third_fourth;
+        VectorXd temp6_vec = (y.array() * QjY.array()).colwise().sum();
+        grad(j) += ((n-q) * (temp6_vec.array()/temp5_vec.array())).sum();
       }
     }
     // clip the gradient
@@ -774,6 +801,7 @@ List predict(const MatrixXd &x, const MatrixXd &xp, const MatrixXd &NNmatrix,
                const String kernel_type, const double alpha, const double q_95, 
                const MatrixXd& trend, 
                const MatrixXd& testing_trend,
+               const bool isotropic,
                const String zero_mean = "Yes")
 {
   int k = y.cols();
@@ -783,7 +811,7 @@ List predict(const MatrixXd &x, const MatrixXd &xp, const MatrixXd &NNmatrix,
   allx.topRows(x.rows()) = x;
   allx.bottomRows(xp.rows()) = xp;
   // create the U matrix and partitions
-  MatrixXd U = Umatrix(allx, NNmatrix, gamma, nu, kernel_type, alpha)[0];
+  MatrixXd U = Umatrix(allx, NNmatrix, gamma, nu, kernel_type, alpha, isotropic)[0];
   MatrixXd UoUot = U.block(0,0,n,n) * U.block(0,0,n,n).transpose() ;
   MatrixXd Up = U.block(n,n,np,np);
   MatrixXd Uopt = U.block(0, n, n, np).transpose();
@@ -792,42 +820,37 @@ List predict(const MatrixXd &x, const MatrixXd &xp, const MatrixXd &NNmatrix,
   MatrixXd upper95(np, k);
   MatrixXd lower95(np, k);
   VectorXd Sigma_ii(np);
-  for (int i = 0; i < np; i++){
-    VectorXd i_vec = VectorXd::Zero(np);
-    i_vec[i] = 1;
-    VectorXd temp = Up.triangularView<Eigen::Upper>().solve(i_vec);
-    Sigma_ii[i] = temp.transpose() * temp;
-    // compute Sigma_ii
-  }
+  
+  MatrixXd I_np = MatrixXd::Identity(np,np);
+  MatrixXd Up_inv = Up.triangularView<Eigen::Upper>().solve(I_np);
+  Sigma_ii = Up_inv.colwise().squaredNorm().transpose();
+  MatrixXd UoUotY = UoUot * y;
   if (zero_mean == "Yes"){
-    for (int j = 0; j < k; j++){
-      MatrixXd y_j = y.col(j);
-      double sigma2_j = (y_j.transpose() * UoUot * y_j)(0,0)/n;
-      MatrixXd temp_mean = - Up.transpose().triangularView<Eigen::Lower>().solve(Uopt * y_j);
-      pred_mean.col(j) = temp_mean;
-      MatrixXd temp_sd = q_95 * ((sigma2_j * Sigma_ii.array())).sqrt().matrix();
-      MatrixXd temp_bound = temp_mean + temp_sd;
-      upper95.col(j) = temp_bound;
-      temp_bound = temp_mean - temp_sd;
-      lower95.col(j) = temp_bound;
-    }
+    VectorXd sigma2_vec = (y.array() * UoUotY.array()).colwise().sum().transpose() / n;
+    MatrixXd UoptY = Uopt * y; 
+    pred_mean = -Up_inv.transpose() * UoptY;
+    MatrixXd temp_sd = q_95 * ((Sigma_ii * sigma2_vec.transpose()).array().sqrt()).matrix();
+    upper95 = pred_mean + temp_sd;
+    lower95 = pred_mean - temp_sd;
   } else{
     MatrixXd H = trend; 
+    MatrixXd Ht = H.transpose();
     MatrixXd Hp = testing_trend;
     int q = H.cols();
+    MatrixXd temp = Ht * UoUot * H;
+    LLT<MatrixXd> llt(temp);
+    MatrixXd temp_inv = llt.solve(MatrixXd::Identity(q, q));
+    MatrixXd theta = temp_inv * (Ht * UoUotY);
+    MatrixXd yhat = y - H * theta;
+    pred_mean = Hp * theta - Up_inv.transpose() * (Uopt * yhat);
+    VectorXd sigma2_vec(k);
     for (int j = 0; j < k; j++){
-      MatrixXd y_j = y.col(j);
-      MatrixXd temp = H.transpose() * UoUot * H;
-      LLT<MatrixXd> llt(temp);
-      MatrixXd temp_inv = llt.solve(MatrixXd::Identity(q, q));
-      MatrixXd theta_j = temp_inv * H.transpose() * (UoUot * y_j);
-      MatrixXd temp_mean = Hp * theta_j - Up.transpose().triangularView<Eigen::Lower>().solve(Uopt * (y_j - H * theta_j));
-      pred_mean.col(j) = temp_mean;
-      double sigma2_j = ((y_j- H * theta_j).transpose() * UoUot * (y_j- H* theta_j))(0,0)/(n-q);
-      MatrixXd temp_sd = q_95 * ((sigma2_j * Sigma_ii.array())).sqrt().matrix();
-      upper95.col(j) = temp_mean + temp_sd;
-      lower95.col(j) = temp_mean - temp_sd;
+      VectorXd r_j = yhat.col(j);
+      sigma2_vec(j) = (r_j.transpose() * UoUot* r_j)(0,0)/(n-q);
     }
+    MatrixXd temp_sd = q_95 * ((Sigma_ii * sigma2_vec.transpose()).array().sqrt()).matrix();
+    upper95 = pred_mean + temp_sd;
+    lower95 = pred_mean - temp_sd;
   }
   return Rcpp::List::create(pred_mean, lower95, upper95);
 }
@@ -837,7 +860,7 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
                     const MatrixXd &x, const MatrixXd &NNmatrix,
                     const MatrixXd &y,
                     const String kernel_type, const double alpha, 
-                    const MatrixXd &trend, const String zero_mean = "Yes"){
+                    const MatrixXd &trend, const bool isotropic, const String zero_mean = "Yes"){
   using namespace std::chrono;
   auto start = high_resolution_clock::now();
   int k = y.cols();
@@ -878,8 +901,8 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
       MatrixXd XSX = MatrixXd::Zero(q, q);
       
       // need to first compute this
-      vector<vector<MatrixXd>> Bi_inv_B_ir_list(n, vector<MatrixXd>(p+1));
-      vector<vector<MatrixXd>> Ai_inv_A_ir_list(n, vector<MatrixXd>(p+1));
+      vector<vector<MatrixXd>> Bi_inv_Bir_list(n, vector<MatrixXd>(p+1));
+      vector<vector<MatrixXd>> Ai_inv_Air_list(n, vector<MatrixXd>(p+1));
       vector<MatrixXd> Ri_Bi_inv_list(n);
       vector<MatrixXd> Qi_Ai_inv_list(n);
       vector<MatrixXd> dXSXr(p+1, MatrixXd::Zero(q,q));
@@ -889,108 +912,120 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
       
       for (int i = 0; i < n; ++i) {
         if (i == 0){
-          MatrixXd v_i = x.row(i);
-          MatrixXd R_i = H.row(i);
-          double B_i = kernel_func(v_i, v_i, gamma, nu, alpha)(0,0);
-          MatrixXd Ri_Bi_inv = (R_i * 1/B_i).transpose();
+          MatrixXd vi = x.row(i);
+          MatrixXd Ri = H.row(i);
+          double Bi = kernel_func(vi, vi, gamma, nu, alpha, isotropic)(0,0);
+          MatrixXd Ri_Bi_inv = Ri.transpose() * 1/Bi;
           Ri_Bi_inv_list[i] = Ri_Bi_inv;
           Qi_Ai_inv_list[i] = MatrixXd::Zero(q,1);
-          XSX += Ri_Bi_inv * R_i;
+          XSX += Ri_Bi_inv * Ri;
           for (int r = 0; r < p; ++r){
-            MatrixXd B_ir = kernel_func_deriv_gamma_k(v_i, v_i, gamma, nu, alpha, r);
-            MatrixXd Bi_inv_B_ir = B_ir / B_i;
-            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_B_ir * R_i);
-            dlogdetr[r] += Bi_inv_B_ir.trace();
-            Bi_inv_B_ir_list[i][r] = Bi_inv_B_ir;
-            Ai_inv_A_ir_list[i][r] = MatrixXd::Zero(1,1);
+            MatrixXd B_ir = kernel_func_deriv_gamma_k(vi, vi, gamma, nu, alpha, r, isotropic);
+            MatrixXd Bi_inv_Bir = B_ir / Bi;
+            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_Bir * Ri);
+            dlogdetr[r] += Bi_inv_Bir.trace();
+            Bi_inv_Bir_list[i][r] = Bi_inv_Bir;
+            Ai_inv_Air_list[i][r] = MatrixXd::Zero(1,1);
           }
           dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose();
           MatrixXd Bi_inv(1,1);
-          Bi_inv(0,0) = 1/B_i;
-          dlogdetr[p] += 1/B_i;
+          Bi_inv(0,0) = 1/Bi;
+          dlogdetr[p] += 1/Bi;
           // the last column saves Bi_inv;
-          Bi_inv_B_ir_list[i][p] = Bi_inv;
-          Ai_inv_A_ir_list[i][p] = MatrixXd::Zero(1,1);
+          Bi_inv_Bir_list[i][p] = Bi_inv;
+          Ai_inv_Air_list[i][p] = MatrixXd::Zero(1,1);
           
           for (int r = 0; r < p + 1; ++r){
             for (int s = 0; s < p + 1; ++s){
-              fisher(r,s) += 0.5 * (Bi_inv_B_ir_list[i][r] * Bi_inv_B_ir_list[i][s]).trace();
+              fisher(r,s) += 0.5 * (Bi_inv_Bir_list[i][r] * Bi_inv_Bir_list[i][s]).trace();
             }
           }
           
-          logdet += log(B_i);
+          logdet += log(Bi);
         } else{
           int num_neighbors = std::min(i, m);
-          MatrixXd v_i(num_neighbors+1, p);
-          v_i.row(0) = x.row(i);
-          MatrixXd R_i(num_neighbors+1, q);
-          R_i.row(0) = H.row(i);
+          MatrixXd vi(num_neighbors+1, p);
+          MatrixXd ui(num_neighbors, p);
+          MatrixXd Ri(num_neighbors+1, q);
+          MatrixXd Qi(num_neighbors, q);
           VectorXi idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose().cast<int>();
           for (int j = 0; j < num_neighbors; ++j){
-            v_i.row(j+1) = x.row(idx[j] - 1);
-            R_i.row(j+1) = H.row(idx[j] - 1);
+            ui.row(j) = x.row(idx[j] - 1);
+            Qi.row(j) = H.row(idx[j] - 1);
           }
-          MatrixXd u_i = v_i.block(1, 0, num_neighbors, p);
-          MatrixXd B_i = kernel_func(v_i, v_i, gamma, nu, alpha);
-          // remove the first column and the first row;
-          MatrixXd A_i = B_i.block(1, 1, num_neighbors, num_neighbors);
-          MatrixXd Q_i = R_i.block(1, 0, num_neighbors, q);
+          vi.topRows(num_neighbors) = ui;
+          vi.row(num_neighbors) = x.row(i);
+          Ri.topRows(num_neighbors) = Qi;
+          Ri.row(num_neighbors) = Qi.row(i);
           
-          LLT<MatrixXd> llt_B_i(B_i); 
-          LLT<MatrixXd> llt_A_i(A_i);
-          MatrixXd Ri_Bi_inv = llt_B_i.solve(R_i).transpose();
+          MatrixXd Bi = kernel_func(vi, vi, gamma, nu, alpha, isotropic);
+          // remove the first column and the first row;
+          MatrixXd Ai = Bi.topLeftCorner(Bi.rows() - 1, Bi.cols() - 1);
+          
+          LLT<MatrixXd> llt_Bi(Bi); 
+          MatrixXd LBi = llt_Bi.matrixL();
+
+          LLT<MatrixXd> llt_Ai(Ai);
+          MatrixXd LAi = llt_Ai.matrixL();
+          
+          // done with logdet
+          double logdet_Bi = 2.0 * LBi.diagonal().array().log().sum();
+          double logdet_Ai = 2.0 * LAi.diagonal().array().log().sum();
+          logdet += logdet_Bi - logdet_Ai;
+          
+          MatrixXd temp_Bi = LBi.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
+          MatrixXd Bi_inv = LBi.transpose().triangularView<Upper>().solve(temp_Bi);
+          
+          MatrixXd temp_Ai = LAi.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors, num_neighbors));
+          MatrixXd Ai_inv = LAi.transpose().triangularView<Upper>().solve(temp_Ai);
+          
+          MatrixXd Ri_Bi_inv = Ri.transpose() * Bi_inv;
           Ri_Bi_inv_list[i] = Ri_Bi_inv;
-          MatrixXd Qi_Ai_inv = llt_A_i.solve(Q_i).transpose();
+          MatrixXd Qi_Ai_inv = Qi.transpose() * Ai_inv;
           Qi_Ai_inv_list[i] = Qi_Ai_inv;
+          
           // done with XSX
-          XSX += Ri_Bi_inv * R_i - Qi_Ai_inv * Q_i;
+          XSX += Ri_Bi_inv * Ri - Qi_Ai_inv * Qi;
           
           // deal with gamma derive first
           for (int r = 0; r < p; ++r){
-            MatrixXd B_ir = kernel_func_deriv_gamma_k(v_i, v_i, gamma, nu, alpha, r);
-            MatrixXd A_ir = B_ir.block(1, 1, num_neighbors, num_neighbors);
-            MatrixXd Bi_inv_B_ir = llt_B_i.solve(B_ir);
-            MatrixXd Ai_inv_A_ir = llt_A_i.solve(A_ir);
-            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_B_ir * R_i) - Qi_Ai_inv * (Ai_inv_A_ir * Q_i);
-            dlogdetr[r] += Bi_inv_B_ir.trace() - Ai_inv_A_ir.trace();
-            Bi_inv_B_ir_list[i][r] = Bi_inv_B_ir;
-            Ai_inv_A_ir_list[i][r] = Ai_inv_A_ir;
+            MatrixXd Bir = kernel_func_deriv_gamma_k(vi, vi, gamma, nu, alpha, r, isotropic);
+            MatrixXd Air = Bir.topLeftCorner(Bir.rows() - 1, Bir.cols() - 1);
+            MatrixXd Bi_inv_Bir = Bi_inv * Bir;
+            MatrixXd Ai_inv_Air = Ai_inv * Air;
+            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_Bir * Ri) - Qi_Ai_inv * (Ai_inv_Air * Qi);
+            dlogdetr[r] += Bi_inv_Bir.trace() - Ai_inv_Air.trace();
+            Bi_inv_Bir_list[i][r] = Bi_inv_Bir;
+            Ai_inv_Air_list[i][r] = Ai_inv_Air;
           }
-          // now nu derive, B_ir = I, A_ir = I
+          // now for nu, Bir = I, Air = I
           // done with dXSXr
           dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose() - Qi_Ai_inv * Qi_Ai_inv.transpose();
           
-          // calculate the logdet for the loglikelihood
-          MatrixXd LB_i = llt_B_i.matrixL();
-          double logdet_B_i = 2.0 * LB_i.diagonal().array().log().sum();
-          MatrixXd LA_i = llt_A_i.matrixL();
-          double logdet_A_i = 2.0 * LA_i.diagonal().array().log().sum();
-          logdet += logdet_B_i - logdet_A_i;
-          
-          MatrixXd temp_B_i = LB_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
-          MatrixXd Bi_inv = LB_i.transpose().triangularView<Upper>().solve(temp_B_i);
-          
-          MatrixXd temp_A_i = LA_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors, num_neighbors));
-          MatrixXd Ai_inv = LA_i.transpose().triangularView<Upper>().solve(temp_A_i);
           // done with logdetr
           dlogdetr[p] += Bi_inv.trace() - Ai_inv.trace();
           // the last column saves Bi_inv;
-          Bi_inv_B_ir_list[i][p] = Bi_inv;
-          Ai_inv_A_ir_list[i][p] = Ai_inv;
+          Bi_inv_Bir_list[i][p] = Bi_inv;
+          Ai_inv_Air_list[i][p] = Ai_inv;
           // construct the fisher information matrix
           for (int r = 0; r < p + 1; ++r){
             for (int s = 0; s < p + 1; ++s){
-              fisher(r,s) += 0.5 * ((Bi_inv_B_ir_list[i][r] * Bi_inv_B_ir_list[i][s]).trace() -
-                (Ai_inv_A_ir_list[i][r] * Ai_inv_A_ir_list[i][s]).trace());
+              fisher(r,s) += 0.5 * ((Bi_inv_Bir_list[i][r] * Bi_inv_Bir_list[i][s]).trace() -
+                (Ai_inv_Air_list[i][r] * Ai_inv_Air_list[i][s]).trace());
             }
           }
         }
       }
+      auto end = high_resolution_clock::now();
+      duration<double> diff = end - start;
+      Rcpp::Rcout << "Fisher Scoring took " << diff.count() << " seconds.\n";
+      
       LLT<MatrixXd> llt_XSX(XSX);
       MatrixXd XSX_inv = llt_XSX.solve(MatrixXd::Identity(q, q));
       
       // finish the fisher information matrix
       fisher *= k;
+      
       // TODO:: add transform. 
       VectorXd diag_values(p+1);
       diag_values.head(p) = gamma.array().square();
@@ -1011,12 +1046,12 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
           if (i == 0){
             VectorXd y_v_i(1);
             y_v_i[0] = y_j[0];
-            VectorXd Bi_inv_y_v_i = Bi_inv_B_ir_list[i][p] * y_v_i;
+            VectorXd Bi_inv_y_v_i = Bi_inv_Bir_list[i][p] * y_v_i;
             YSY_j += y_v_i.dot(Bi_inv_y_v_i);
             XSY_j += Ri_Bi_inv_list[i] * y_v_i;
             for (int r = 0; r < p+1; ++r){
-              dYSYr_j[r] -= y_v_i.dot(Bi_inv_B_ir_list[i][r] * (Bi_inv_y_v_i));
-              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_B_ir_list[i][r].transpose() * y_v_i);
+              dYSYr_j[r] -= y_v_i.dot(Bi_inv_Bir_list[i][r] * (Bi_inv_y_v_i));
+              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_Bir_list[i][r].transpose() * y_v_i);
             }
           } else{
             int num_neighbors = std::min(i, m);
@@ -1030,16 +1065,16 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
             VectorXd y_u_i = y_v_i.tail(num_neighbors);
             
             
-            VectorXd Bi_inv_y_v_i = Bi_inv_B_ir_list[i][p] * y_v_i;
-            VectorXd Ai_inv_y_u_i = Ai_inv_A_ir_list[i][p] * y_u_i;
+            VectorXd Bi_inv_y_v_i = Bi_inv_Bir_list[i][p] * y_v_i;
+            VectorXd Ai_inv_y_u_i = Ai_inv_Air_list[i][p] * y_u_i;
             YSY_j += y_v_i.dot(Bi_inv_y_v_i) - y_u_i.dot(Ai_inv_y_u_i);
             XSY_j += Ri_Bi_inv_list[i] * y_v_i - Qi_Ai_inv_list[i] * y_u_i;
             
             for (int r = 0; r < p+1; ++r){
-              dYSYr_j[r] -= y_v_i.dot(Bi_inv_B_ir_list[i][r] * (Bi_inv_y_v_i)) -
-                y_u_i.dot(Ai_inv_A_ir_list[i][r] * (Ai_inv_y_u_i));
-              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_B_ir_list[i][r].transpose() * y_v_i) - 
-                Qi_Ai_inv_list[i] * (Ai_inv_A_ir_list[i][r].transpose() * y_u_i);
+              dYSYr_j[r] -= y_v_i.dot(Bi_inv_Bir_list[i][r] * (Bi_inv_y_v_i)) -
+                y_u_i.dot(Ai_inv_Air_list[i][r] * (Ai_inv_y_u_i));
+              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_Bir_list[i][r].transpose() * y_v_i) - 
+                Qi_Ai_inv_list[i] * (Ai_inv_Air_list[i][r].transpose() * y_u_i);
             }
           }
         }
@@ -1071,9 +1106,6 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
   } else{ // if nugget_est = FALSE
     
   }
-  auto end = high_resolution_clock::now();
-  duration<double> diff = end - start;
-  Rcpp::Rcout << "Fisher Scoring took " << diff.count() << " seconds.\n";
   return Rcpp::List::create(loglik, grad, fisher);
 }
 
@@ -1083,7 +1115,7 @@ double fisher_loglik(const VectorXd params, double tau, const bool nugget_est,
                     const MatrixXd &x, const MatrixXd &NNmatrix,
                     const MatrixXd &y,
                     const String kernel_type, const double alpha, 
-                    const MatrixXd &trend, const String zero_mean = "Yes"){
+                    const MatrixXd &trend, const bool isotropic, const String zero_mean = "Yes"){
   using namespace std::chrono;
   auto start = high_resolution_clock::now();
   int k = y.cols();
@@ -1126,7 +1158,7 @@ double fisher_loglik(const VectorXd params, double tau, const bool nugget_est,
         if (i == 0){
           MatrixXd v_i = x.row(i);
           MatrixXd R_i = H.row(i);
-          double B_i = kernel_func(v_i, v_i, gamma, nu, alpha)(0,0);
+          double B_i = kernel_func(v_i, v_i, gamma, nu, alpha, isotropic)(0,0);
           MatrixXd Ri_Bi_inv = (R_i * 1/B_i).transpose();
           Ri_Bi_inv_list[i] = Ri_Bi_inv;
           Qi_Ai_inv_list[i] = MatrixXd::Zero(q,1);
@@ -1150,7 +1182,7 @@ double fisher_loglik(const VectorXd params, double tau, const bool nugget_est,
             R_i.row(j+1) = H.row(idx[j] - 1);
           }
           MatrixXd u_i = v_i.block(1, 0, num_neighbors, p);
-          MatrixXd B_i = kernel_func(v_i, v_i, gamma, nu, alpha);
+          MatrixXd B_i = kernel_func(v_i, v_i, gamma, nu, alpha, isotropic);
           // remove the first column and the first row;
           MatrixXd A_i = B_i.block(1, 1, num_neighbors, num_neighbors);
           MatrixXd Q_i = R_i.block(1, 0, num_neighbors, q);
@@ -1297,229 +1329,26 @@ Eigen::MatrixXd separable_multi_kernel (List R0, const Eigen::VectorXd  & beta,c
 }
 
 // [[Rcpp::export]]
-double log_marginal_lik_ppgasp(const Eigen::VectorXd &  param,double nugget, 
-                               const bool nugget_est, const List R0, 
-                               const Eigen::MatrixXd & X,
-                               const String zero_mean,
-                               const Eigen::MatrixXd & output, 
-                               const Eigen::VectorXi  &kernel_type,
-                               const Eigen::VectorXd & alpha ){
-  Eigen::VectorXd beta;
-  double nu=nugget;
-  int k=output.cols();
-  int param_size=param.size();
-  if(!nugget_est){
-    beta= param.array().exp().matrix();
-    // nu=0;
-  }else{
-    beta=param.head(param_size-1).array().exp().matrix(); 
-    nu=exp(param[param_size-1]); //nugget
-  }
-  
-  int num_obs=output.rows();
-  MatrixXd R= separable_multi_kernel(R0,beta, kernel_type,alpha);
-  R=R+nu*MatrixXd::Identity(num_obs,num_obs);  //not sure 
-  
-  LLT<MatrixXd> lltOfR(R);             // compute the cholesky decomposition of R called lltofR
-  MatrixXd L = lltOfR.matrixL();   //retrieve factor L  in the decomposition
-  if(zero_mean=="Yes"){
-    
-    MatrixXd yt_R_inv= (L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(output))).transpose(); 
-    
-    
-    
-    double log_S_2=0;
-    
-    for(int loc_i=0;loc_i<k;loc_i++){
-      log_S_2=log_S_2+log((yt_R_inv.row(loc_i)*output.col(loc_i))(0,0));
-    }
-    
-    //double log_S_2=log(S_2);
-    
-    return -k*(L.diagonal().array().log().matrix().sum())-(num_obs)/2.0*log_S_2;
-    
-  }else{
-    
-    int q=X.cols();
-    
-    MatrixXd R_inv_X=L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(X)); //one forward and one backward to compute R.inv%*%X
-    MatrixXd Xt_R_inv_X=X.transpose()*R_inv_X; //Xt%*%R.inv%*%X
-    
-    LLT<MatrixXd> lltOfXRinvX(Xt_R_inv_X); // cholesky decomposition of Xt_R_inv_X called lltOfXRinvX
-    MatrixXd LX = lltOfXRinvX.matrixL();  //  retrieve factor LX  in the decomposition 
-    MatrixXd R_inv_X_Xt_R_inv_X_inv_Xt_R_inv= R_inv_X*(LX.transpose().triangularView<Upper>().solve(LX.triangularView<Lower>().solve(R_inv_X.transpose())));          //compute  R_inv_X_Xt_R_inv_X_inv_Xt_R_inv through one forward and one backward solve
-    MatrixXd yt_R_inv= (L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(output))).transpose(); 
-    
-    //double log_S_2=((yt_R_inv.array()*output.array()).rowwise().sum().log()).sum();
-    
-    
-    double log_S_2=0;
-    
-    for(int loc_i=0;loc_i<k;loc_i++){
-      log_S_2=log_S_2+log((yt_R_inv.row(loc_i)*output.col(loc_i))(0,0)-(output.col(loc_i).transpose()*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output.col(loc_i))(0,0));
-    }
-    
-    MatrixXd R_inv = lltOfR.solve(MatrixXd::Identity(R.rows(), R.cols()));
-    // double log_S_2=log(S_2);
-    MatrixXd Q = R_inv -  R_inv_X_Xt_R_inv_X_inv_Xt_R_inv;
-    //MatrixXd S_2= (yt_R_inv*output-output.transpose()*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output);
-    //double log_S_2=log(S_2(0,0));
-    return (-k*(L.diagonal().array().log().matrix().sum())-k*(LX.diagonal().array().log().matrix().sum())-(num_obs-q)/2.0*log_S_2);
-  }
+double integral_approx(VectorXd f, int lb, int ub, float d){ //lb and ub - 1 
+  VectorXd v =f.segment(lb,ub-lb+1); 
+  double res=(v.array().sum()*2.0-v[0]-v[v.size()-1])*d/2.0;
+  return res;
 }
 
 // [[Rcpp::export]]
-Eigen::MatrixXd pow_exp_deriv(const MatrixXd & R0_i, const Eigen::MatrixXd & R, const double beta_i, const double alpha_i){
-  return  -(R.array()*(R0_i.array().pow(alpha_i))).matrix()*alpha_i*pow(beta_i,alpha_i-1);
-}
-
-// [[Rcpp::export]]
-List log_marginal_lik_deriv_ppgasp(const VectorXd & param,
-                                              double nugget,  
-                                              bool nugget_est, 
-                                              const List R0, 
-                                              const MatrixXd& X,
-                                              const String zero_mean,
-                                              const MatrixXd & output, 
-                                              const VectorXi & kernel_type,
-                                              const VectorXd & alpha){
+double beta_Omega_cpp(VectorXd rho, int a, int L){
+  int k = rho.size();
+  float d = (L+a)/(float(k-1));
+  int t = a/d;
+  double integral_denominator;
   
-  VectorXd beta;
-  double nu=nugget;
-  int k=output.cols();
-  int param_size=param.size();
-  if(nugget_est==false){//not sure about the logical stuff
-    beta= param.array().exp().matrix();
-  }else{
-    beta=param.head(param_size-1).array().exp().matrix(); 
-    nu=exp(param[param_size-1]); //nugget
+  VectorXd integral_vec = VectorXd::Zero(k-t);
+  for (int j=t;j<k;j++){
+    integral_denominator = integral_approx(rho,j-t,j,d);
+    
+    integral_vec[j-t]=rho[j-t]/(1.0-integral_denominator);
   }
-  int p=beta.size();
-  int num_obs=output.rows();
-  MatrixXd R= separable_multi_kernel(R0,beta,kernel_type,alpha);
-  MatrixXd R_ori=  R;  // this is the one without the nugget
   
-  R=R+nu*MatrixXd::Identity(num_obs,num_obs);  //not sure 
-  
-  LLT<MatrixXd> lltOfR(R);
-  MatrixXd L = lltOfR.matrixL();
-  VectorXd ans=VectorXd::Ones(param_size);
-  
-  //String kernel_type_ti;
-  
-  MatrixXd Vb_ti;
-  if(zero_mean=="Yes"){
-    MatrixXd yt_R_inv= (L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(output))).transpose(); 
-    //MatrixXd S_2= (yt_R_inv*output);
-    
-    //double log_S_2=log(S_2(0,0));
-    VectorXd S_2_vec=VectorXd::Zero(k);
-    
-    for(int loc_i=0;loc_i<k;loc_i++){
-      S_2_vec[loc_i]=(yt_R_inv.row(loc_i)*output.col(loc_i))(0,0);
-      
-    }
-    MatrixXd dev_R_i;
-    //allow different choices of kernels
-    for(int ti=0;ti<p;ti++){
-      if(kernel_type[ti]==1){
-        dev_R_i=pow_exp_deriv( R0[ti],R_ori,beta[ti],alpha[ti]);   //now here I have R_ori instead of R
-      }
-      Vb_ti=L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(dev_R_i));
-      
-      
-      double ratio=0;
-      
-      for(int loc_i=0;loc_i<k;loc_i++){
-        ratio=ratio+((output.col(loc_i).transpose()*Vb_ti*(yt_R_inv.transpose()).col(loc_i) )(0,0))/S_2_vec[loc_i];
-      }
-      ans[ti]=-0.5*k*Vb_ti.diagonal().sum()+num_obs/2.0*ratio;
-      //ans[ti]=-0.5*Vb_ti.diagonal().sum()+(num_obs/2.0*output.transpose()*Vb_ti*yt_R_inv.transpose()/ S_2(0,0))(0,0) ;  
-    }
-    //the last one if the nugget exists
-    if(nugget_est){
-      dev_R_i=MatrixXd::Identity(num_obs,num_obs);
-      Vb_ti=L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(dev_R_i));
-      
-      double ratio=0;
-      for(int loc_i=0;loc_i<k;loc_i++){
-        ratio=ratio+((output.col(loc_i).transpose()*Vb_ti*(yt_R_inv.transpose()).col(loc_i))(0,0))/S_2_vec[loc_i];
-      }
-      ans[p]=-0.5*k*Vb_ti.diagonal().sum()+num_obs/2.0*ratio;
-      //ans[p]=-0.5*Vb_ti.diagonal().sum()+(num_obs/2.0*output.transpose()*Vb_ti*yt_R_inv.transpose()/ S_2(0,0))(0,0); 
-    }
-  }else{
-    int q=X.cols();
-    MatrixXd R_inv_X=L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(X));
-    MatrixXd Xt_R_inv_X=X.transpose()*R_inv_X;
-    
-    LLT<MatrixXd> lltOfXRinvX(Xt_R_inv_X);
-    MatrixXd LX = lltOfXRinvX.matrixL();
-    MatrixXd R_inv_X_Xt_R_inv_X_inv_Xt_R_inv= R_inv_X*(LX.transpose().triangularView<Upper>().solve(LX.triangularView<Lower>().solve(R_inv_X.transpose())));
-    MatrixXd yt_R_inv= (L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(output))).transpose();
-    MatrixXd dev_R_i;
-    MatrixXd Wb_ti;
-    //allow different choices of kernels
-    
-    
-    VectorXd S_2_vec=VectorXd::Zero(k);
-    
-    for(int loc_i=0;loc_i<k;loc_i++){
-      S_2_vec[loc_i]=(yt_R_inv.row(loc_i)*output.col(loc_i))(0,0)-(output.col(loc_i).transpose()*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output.col(loc_i))(0,0);
-    }
-    
-    
-    // double log_S_2=0;
-    
-    //for(int loc_i=0;loc_i<k;loc_i++){
-    //  log_S_2=log_S_2+log((yt_R_inv.row(loc_i)*output.col(loc_i))(0,0)-(output.col(loc_i).transpose()*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output.col(loc_i))(0,0));
-    //}
-    
-    
-    for(int ti=0;ti<p;ti++){
-      //kernel_type_ti=kernel_type[ti];
-     if(kernel_type[ti]==1){
-        dev_R_i=pow_exp_deriv( R0[ti],R_ori,beta[ti],alpha[ti]);   //now here I have R_ori instead of R
-      }
-      Wb_ti=(L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(dev_R_i))).transpose()-dev_R_i*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv;
-      
-      double ratio=0;
-      
-      for(int loc_i=0;loc_i<k;loc_i++){
-        ratio=ratio+((output.col(loc_i).transpose()*Wb_ti.transpose()*(yt_R_inv.row(loc_i).transpose()-R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output.col(loc_i)))(0,0))/S_2_vec[loc_i];
-      }
-      
-      
-      
-      //MatrixXd S_2= (yt_R_inv*output-output.transpose()*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output);
-      
-      //MatrixXd Q_output= yt_R_inv.transpose()-R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output;
-      
-      ans[ti]=-0.5*k*Wb_ti.diagonal().sum()+(num_obs-q)/2.0*ratio; 
-      
-      
-      //ans[ti]=-0.5*Wb_ti.diagonal().sum()+(num_obs-q)/2.0*(output.transpose()*Wb_ti.transpose()*Q_output/S_2(0,0))(0,0); 
-    }
-    
-    
-    
-    if(nugget_est){
-      dev_R_i=MatrixXd::Identity(num_obs,num_obs);
-      Wb_ti=(L.transpose().triangularView<Upper>().solve(L.triangularView<Lower>().solve(dev_R_i))).transpose()-dev_R_i*R_inv_X_Xt_R_inv_X_inv_Xt_R_inv;
-      
-      //double S_2_dev=0;
-      double ratio=0;
-      
-      for(int loc_i=0;loc_i<k;loc_i++){
-        ratio=ratio+((output.col(loc_i).transpose()*Wb_ti.transpose()*(yt_R_inv.row(loc_i).transpose()-R_inv_X_Xt_R_inv_X_inv_Xt_R_inv*output.col(loc_i)))(0,0))/S_2_vec[loc_i];
-      }
-      ans[p]=-0.5*k*Wb_ti.diagonal().sum()  +(num_obs-q)/2.0*ratio; 
-      
-      //ans[p]=-0.5*Wb_ti.diagonal().sum()+(num_obs-q)/2.0*(output.transpose()*Wb_ti.transpose()*Q_output/S_2(0,0))(0,0); 
-    }
-    
-    
-  }
-  return Rcpp::List::create(ans, Vb_ti);
+  double res = integral_approx(integral_vec,0,integral_vec.size()-1,d);
+  return -res;
 }
-
