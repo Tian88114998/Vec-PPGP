@@ -883,7 +883,7 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
   }
   VectorXd grad;
   MatrixXd fisher; 
-  double loglik;
+  double loglik = 0.0;
   if (nugget_est){
     int p = params.size()-1;
     // convert the parameters
@@ -901,8 +901,8 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
       MatrixXd XSX = MatrixXd::Zero(q, q);
       
       // need to first compute this
-      vector<vector<MatrixXd>> Bi_inv_Bir_list(n, vector<MatrixXd>(p+1));
-      vector<vector<MatrixXd>> Ai_inv_Air_list(n, vector<MatrixXd>(p+1));
+      vector<vector<MatrixXd>> Bi_inv_B_ir_list(n, vector<MatrixXd>(p+1));
+      vector<vector<MatrixXd>> Ai_inv_A_ir_list(n, vector<MatrixXd>(p+1));
       vector<MatrixXd> Ri_Bi_inv_list(n);
       vector<MatrixXd> Qi_Ai_inv_list(n);
       vector<MatrixXd> dXSXr(p+1, MatrixXd::Zero(q,q));
@@ -912,126 +912,114 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
       
       for (int i = 0; i < n; ++i) {
         if (i == 0){
-          MatrixXd vi = x.row(i);
-          MatrixXd Ri = H.row(i);
-          double Bi = kernel_func(vi, vi, gamma, nu, alpha, isotropic)(0,0);
-          MatrixXd Ri_Bi_inv = Ri.transpose() * 1/Bi;
+          MatrixXd v_i = x.row(i);
+          MatrixXd R_i = H.row(i);
+          double B_i = kernel_func(v_i, v_i, gamma, nu, alpha, isotropic)(0,0);
+          MatrixXd Ri_Bi_inv = (R_i * 1/B_i).transpose();
           Ri_Bi_inv_list[i] = Ri_Bi_inv;
           Qi_Ai_inv_list[i] = MatrixXd::Zero(q,1);
-          XSX += Ri_Bi_inv * Ri;
+          XSX += Ri_Bi_inv * R_i;
           for (int r = 0; r < p; ++r){
-            MatrixXd B_ir = kernel_func_deriv_gamma_k(vi, vi, gamma, nu, alpha, r, isotropic);
-            MatrixXd Bi_inv_Bir = B_ir / Bi;
-            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_Bir * Ri);
-            dlogdetr[r] += Bi_inv_Bir.trace();
-            Bi_inv_Bir_list[i][r] = Bi_inv_Bir;
-            Ai_inv_Air_list[i][r] = MatrixXd::Zero(1,1);
+            MatrixXd B_ir = kernel_func_deriv_gamma_k(v_i, v_i, gamma, nu, alpha, r, isotropic);
+            MatrixXd Bi_inv_B_ir = B_ir / B_i;
+            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_B_ir * R_i);
+            dlogdetr[r] += Bi_inv_B_ir.trace();
+            Bi_inv_B_ir_list[i][r] = Bi_inv_B_ir;
+            Ai_inv_A_ir_list[i][r] = MatrixXd::Zero(1,1);
           }
           dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose();
           MatrixXd Bi_inv(1,1);
-          Bi_inv(0,0) = 1/Bi;
-          dlogdetr[p] += 1/Bi;
+          Bi_inv(0,0) = 1/B_i;
+          dlogdetr[p] += 1/B_i;
           // the last column saves Bi_inv;
-          Bi_inv_Bir_list[i][p] = Bi_inv;
-          Ai_inv_Air_list[i][p] = MatrixXd::Zero(1,1);
+          Bi_inv_B_ir_list[i][p] = Bi_inv;
+          Ai_inv_A_ir_list[i][p] = MatrixXd::Zero(1,1);
           
           for (int r = 0; r < p + 1; ++r){
             for (int s = 0; s < p + 1; ++s){
-              fisher(r,s) += 0.5 * (Bi_inv_Bir_list[i][r] * Bi_inv_Bir_list[i][s]).trace();
+              fisher(r,s) += 0.5 * (Bi_inv_B_ir_list[i][r] * Bi_inv_B_ir_list[i][s]).trace();
             }
           }
           
-          logdet += log(Bi);
+          logdet += log(B_i);
         } else{
           int num_neighbors = std::min(i, m);
-          MatrixXd vi(num_neighbors+1, p);
-          MatrixXd ui(num_neighbors, p);
-          MatrixXd Ri(num_neighbors+1, q);
-          MatrixXd Qi(num_neighbors, q);
+          MatrixXd v_i(num_neighbors+1, p);
+          v_i.row(0) = x.row(i);
+          MatrixXd R_i(num_neighbors+1, q);
+          R_i.row(0) = H.row(i);
           VectorXi idx = NNmatrix.block(i, 1, 1, num_neighbors).transpose().cast<int>();
           for (int j = 0; j < num_neighbors; ++j){
-            ui.row(j) = x.row(idx[j] - 1);
-            Qi.row(j) = H.row(idx[j] - 1);
+            v_i.row(j+1) = x.row(idx[j] - 1);
+            R_i.row(j+1) = H.row(idx[j] - 1);
           }
-          vi.topRows(num_neighbors) = ui;
-          vi.row(num_neighbors) = x.row(i);
-          Ri.topRows(num_neighbors) = Qi;
-          Ri.row(num_neighbors) = Qi.row(i);
-          
-          MatrixXd Bi = kernel_func(vi, vi, gamma, nu, alpha, isotropic);
+          MatrixXd u_i = v_i.block(1, 0, num_neighbors, p);
+          MatrixXd B_i = kernel_func(v_i, v_i, gamma, nu, alpha, isotropic);
           // remove the first column and the first row;
-          MatrixXd Ai = Bi.topLeftCorner(Bi.rows() - 1, Bi.cols() - 1);
+          MatrixXd A_i = B_i.block(1, 1, num_neighbors, num_neighbors);
+          MatrixXd Q_i = R_i.block(1, 0, num_neighbors, q);
           
-          LLT<MatrixXd> llt_Bi(Bi); 
-          MatrixXd LBi = llt_Bi.matrixL();
-
-          LLT<MatrixXd> llt_Ai(Ai);
-          MatrixXd LAi = llt_Ai.matrixL();
-          
-          // done with logdet
-          double logdet_Bi = 2.0 * LBi.diagonal().array().log().sum();
-          double logdet_Ai = 2.0 * LAi.diagonal().array().log().sum();
-          logdet += logdet_Bi - logdet_Ai;
-          
-          MatrixXd temp_Bi = LBi.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
-          MatrixXd Bi_inv = LBi.transpose().triangularView<Upper>().solve(temp_Bi);
-          
-          MatrixXd temp_Ai = LAi.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors, num_neighbors));
-          MatrixXd Ai_inv = LAi.transpose().triangularView<Upper>().solve(temp_Ai);
-          
-          MatrixXd Ri_Bi_inv = Ri.transpose() * Bi_inv;
+          LLT<MatrixXd> llt_B_i(B_i); 
+          LLT<MatrixXd> llt_A_i(A_i);
+          MatrixXd Ri_Bi_inv = llt_B_i.solve(R_i).transpose();
           Ri_Bi_inv_list[i] = Ri_Bi_inv;
-          MatrixXd Qi_Ai_inv = Qi.transpose() * Ai_inv;
+          MatrixXd Qi_Ai_inv = llt_A_i.solve(Q_i).transpose();
           Qi_Ai_inv_list[i] = Qi_Ai_inv;
-          
           // done with XSX
-          XSX += Ri_Bi_inv * Ri - Qi_Ai_inv * Qi;
-          
+          XSX += Ri_Bi_inv * R_i - Qi_Ai_inv * Q_i;
           // deal with gamma derive first
           for (int r = 0; r < p; ++r){
-            MatrixXd Bir = kernel_func_deriv_gamma_k(vi, vi, gamma, nu, alpha, r, isotropic);
-            MatrixXd Air = Bir.topLeftCorner(Bir.rows() - 1, Bir.cols() - 1);
-            MatrixXd Bi_inv_Bir = Bi_inv * Bir;
-            MatrixXd Ai_inv_Air = Ai_inv * Air;
-            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_Bir * Ri) - Qi_Ai_inv * (Ai_inv_Air * Qi);
-            dlogdetr[r] += Bi_inv_Bir.trace() - Ai_inv_Air.trace();
-            Bi_inv_Bir_list[i][r] = Bi_inv_Bir;
-            Ai_inv_Air_list[i][r] = Ai_inv_Air;
+            MatrixXd B_ir = kernel_func_deriv_gamma_k(v_i, v_i, gamma, nu, alpha, r, isotropic);
+            MatrixXd A_ir = B_ir.block(1, 1, num_neighbors, num_neighbors);
+            MatrixXd Bi_inv_B_ir = llt_B_i.solve(B_ir);
+            MatrixXd Ai_inv_A_ir = llt_A_i.solve(A_ir);
+            dXSXr[r] -= Ri_Bi_inv * (Bi_inv_B_ir * R_i) - Qi_Ai_inv * (Ai_inv_A_ir * Q_i);
+            dlogdetr[r] += Bi_inv_B_ir.trace() - Ai_inv_A_ir.trace();
+            Bi_inv_B_ir_list[i][r] = Bi_inv_B_ir;
+            Ai_inv_A_ir_list[i][r] = Ai_inv_A_ir;
           }
-          // now for nu, Bir = I, Air = I
+          // now nu derive, B_ir = I, A_ir = I
           // done with dXSXr
           dXSXr[p] -= Ri_Bi_inv * Ri_Bi_inv.transpose() - Qi_Ai_inv * Qi_Ai_inv.transpose();
           
+          // calculate the logdet for the loglikelihood
+          MatrixXd LB_i = llt_B_i.matrixL();
+          double logdet_B_i = 2.0 * LB_i.diagonal().array().log().sum();
+          MatrixXd LA_i = llt_A_i.matrixL();
+          double logdet_A_i = 2.0 * LA_i.diagonal().array().log().sum();
+          logdet += logdet_B_i - logdet_A_i;
+          
+          MatrixXd temp_B_i = LB_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors+1, num_neighbors+1));
+          MatrixXd Bi_inv = LB_i.transpose().triangularView<Upper>().solve(temp_B_i);
+          
+          MatrixXd temp_A_i = LA_i.triangularView<Lower>().solve(MatrixXd::Identity(num_neighbors, num_neighbors));
+          MatrixXd Ai_inv = LA_i.transpose().triangularView<Upper>().solve(temp_A_i);
           // done with logdetr
           dlogdetr[p] += Bi_inv.trace() - Ai_inv.trace();
           // the last column saves Bi_inv;
-          Bi_inv_Bir_list[i][p] = Bi_inv;
-          Ai_inv_Air_list[i][p] = Ai_inv;
+          Bi_inv_B_ir_list[i][p] = Bi_inv;
+          Ai_inv_A_ir_list[i][p] = Ai_inv;
           // construct the fisher information matrix
           for (int r = 0; r < p + 1; ++r){
             for (int s = 0; s < p + 1; ++s){
-              fisher(r,s) += 0.5 * ((Bi_inv_Bir_list[i][r] * Bi_inv_Bir_list[i][s]).trace() -
-                (Ai_inv_Air_list[i][r] * Ai_inv_Air_list[i][s]).trace());
+              fisher(r,s) += 0.5 * ((Bi_inv_B_ir_list[i][r] * Bi_inv_B_ir_list[i][s]).trace() -
+                (Ai_inv_A_ir_list[i][r] * Ai_inv_A_ir_list[i][s]).trace());
             }
           }
         }
       }
-      auto end = high_resolution_clock::now();
-      duration<double> diff = end - start;
-      Rcpp::Rcout << "Fisher Scoring took " << diff.count() << " seconds.\n";
-      
       LLT<MatrixXd> llt_XSX(XSX);
       MatrixXd XSX_inv = llt_XSX.solve(MatrixXd::Identity(q, q));
       
       // finish the fisher information matrix
       fisher *= k;
-      
-      // TODO:: add transform. 
+
+      // transform with the 
       VectorXd diag_values(p+1);
-      diag_values.head(p) = gamma.array().square();
-      diag_values[p] = nu * nu;
+      diag_values.head(p) = -gamma.array();
+      diag_values[p] = nu;
       MatrixXd J = diag_values.asDiagonal();
-      fisher = J * fisher;
+      fisher = J * fisher * J;
       
       double log_sigma = 0.0;
       // deal with gamma and nu grad together
@@ -1046,12 +1034,12 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
           if (i == 0){
             VectorXd y_v_i(1);
             y_v_i[0] = y_j[0];
-            VectorXd Bi_inv_y_v_i = Bi_inv_Bir_list[i][p] * y_v_i;
+            VectorXd Bi_inv_y_v_i = Bi_inv_B_ir_list[i][p] * y_v_i;
             YSY_j += y_v_i.dot(Bi_inv_y_v_i);
             XSY_j += Ri_Bi_inv_list[i] * y_v_i;
             for (int r = 0; r < p+1; ++r){
-              dYSYr_j[r] -= y_v_i.dot(Bi_inv_Bir_list[i][r] * (Bi_inv_y_v_i));
-              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_Bir_list[i][r].transpose() * y_v_i);
+              dYSYr_j[r] -= y_v_i.dot(Bi_inv_B_ir_list[i][r] * (Bi_inv_y_v_i));
+              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_B_ir_list[i][r].transpose() * y_v_i);
             }
           } else{
             int num_neighbors = std::min(i, m);
@@ -1065,16 +1053,16 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
             VectorXd y_u_i = y_v_i.tail(num_neighbors);
             
             
-            VectorXd Bi_inv_y_v_i = Bi_inv_Bir_list[i][p] * y_v_i;
-            VectorXd Ai_inv_y_u_i = Ai_inv_Air_list[i][p] * y_u_i;
+            VectorXd Bi_inv_y_v_i = Bi_inv_B_ir_list[i][p] * y_v_i;
+            VectorXd Ai_inv_y_u_i = Ai_inv_A_ir_list[i][p] * y_u_i;
             YSY_j += y_v_i.dot(Bi_inv_y_v_i) - y_u_i.dot(Ai_inv_y_u_i);
             XSY_j += Ri_Bi_inv_list[i] * y_v_i - Qi_Ai_inv_list[i] * y_u_i;
             
             for (int r = 0; r < p+1; ++r){
-              dYSYr_j[r] -= y_v_i.dot(Bi_inv_Bir_list[i][r] * (Bi_inv_y_v_i)) -
-                y_u_i.dot(Ai_inv_Air_list[i][r] * (Ai_inv_y_u_i));
-              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_Bir_list[i][r].transpose() * y_v_i) - 
-                Qi_Ai_inv_list[i] * (Ai_inv_Air_list[i][r].transpose() * y_u_i);
+              dYSYr_j[r] -= y_v_i.dot(Bi_inv_B_ir_list[i][r] * (Bi_inv_y_v_i)) -
+                y_u_i.dot(Ai_inv_A_ir_list[i][r] * (Ai_inv_y_u_i));
+              dXSYr_j[r] -= Ri_Bi_inv_list[i] * (Bi_inv_B_ir_list[i][r].transpose() * y_v_i) - 
+                Qi_Ai_inv_list[i] * (Ai_inv_A_ir_list[i][r].transpose() * y_u_i);
             }
           }
         }
@@ -1106,6 +1094,9 @@ List fisher_scoring(const VectorXd params, double tau, const bool nugget_est,
   } else{ // if nugget_est = FALSE
     
   }
+  auto end = high_resolution_clock::now();
+  duration<double> diff = end - start;
+  Rcpp::Rcout << "Fisher Scoring took " << diff.count() << " seconds.\n";
   return Rcpp::List::create(loglik, grad, fisher);
 }
 
