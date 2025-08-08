@@ -21,6 +21,7 @@ library(ggplot2)
 library(gridExtra)
 library(patchwork)
 library(nloptr)
+library(cowplot)
 sourceCpp("src/demo.cpp")
 ```
 
@@ -58,7 +59,6 @@ lci <- function(lower, upper){
 
 # generate data
 generate_data <-function(n, p, k, gamma_range, sigma2_range, nugget_range){
-  set.seed(2001)
   Xo = randomLHS(n = n, k = p)
   Yo <- matrix(0, nrow = n, ncol = k)
   for (i in 1:k){
@@ -77,8 +77,43 @@ generate_data <-function(n, p, k, gamma_range, sigma2_range, nugget_range){
 }
 
 gamma_range <- c(0.1, 2)
-sigma2_range <- c(0.1, 1)
-nugget_range <- c(0.1, 0.5)
+sigma2_range <- c(0.1, 0.5)
+nugget_range <- c(0.1, 0.3)
+
+condition_number <- function(info){
+  if(max(diag(info))/min(diag(info)) > 1e6){
+    return( max(diag(info))/min(diag(info)) )
+  } else {
+    ee <- eigen(info)
+    return( max(ee$values)/min(ee$values) )
+  }
+}    
+
+energy_pred_NRMSE = function(n_test, pred_rho_di, a, L, k, be_Omega_test, delete_index, plot=T){
+  pred_rho = matrix(0,ncol=k,nrow=n_test)
+  pred_rho[,-delete_index]=pred_rho_di
+  pred_be_Omega = rep(NA,n_test)
+  for(i in 1:(n_test)){
+    pred_be_Omega[i]=beta_Omega_cpp(pred_rho[i,],a,L)
+  }
+  if(plot == T){
+    plot(be_Omega_test,pred_be_Omega)
+    abline(0,1,col=2,lwd=1.5)
+  }
+  #check whether there's NA prediction in beta*Omega
+  if(sum(is.na(pred_be_Omega))>0){
+    print(paste(sum(is.na(pred_be_Omega)),"NA in prediction of beta*Omega produced"))
+    Omega_na_index = which(is.na(pred_be_Omega))
+    be_Omega_RMSE=sqrt(mean((pred_be_Omega[-Omega_na_index]-be_Omega_test[-Omega_na_index])^2))
+    be_Omega_NRMSE=sqrt(mean((pred_be_Omega[-Omega_na_index]-be_Omega_test[-Omega_na_index])^2))/sd(be_Omega_test[-Omega_na_index])
+  }else{
+    be_Omega_RMSE=sqrt(mean((pred_be_Omega-be_Omega_test)^2))
+    be_Omega_NRMSE=sqrt(mean((pred_be_Omega-be_Omega_test)^2))/sd(be_Omega_test)
+  }
+
+  return(list(pred_be_Omega=pred_be_Omega,be_Omega_test=be_Omega_test,
+              be_Omega_RMSE=be_Omega_RMSE,be_Omega_NRMSE=be_Omega_NRMSE,pred_rho=pred_rho))
+}
 ```
 
 ### Parameter Estimation
@@ -640,7 +675,7 @@ res[[1]]
 # now we add a nugget, 2 gamma, 1 nu.
 sourceCpp("src/demo.cpp")
 set.seed(2001)
-n = 500
+n = 1000
 Xo = randomLHS(n = n, k = 2)
 
 gamma = c(2, 3)
@@ -656,137 +691,198 @@ maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
 nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
 
+eta = log(1/gamma)
+tau = log(nu)
 system.time(
-  {res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), nu = 2, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), kernel_type = "matern_5_2", alpha = 1.9, zero_mean = "No")}
+  {res_vec = neg_vecchia_marginal_log_likelihood(params = c(eta, tau), nu = 2, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(1, nrow = n), isotropic = F, kernel_type = "matern_3_2", alpha = 1.9, zero_mean = "No")}
 )
 
+gamma = c(2,2)
 R0 = generate_R0(ordered_sample, ordered_sample)
-log_inv_gamma = log(1/gamma)
 # the input type of kernel_type is wrong. It only takes integer, not string
-log_nu = log(nu)
 system.time({
-res = RobustGaSP::log_marginal_lik_ppgasp(param = c(log_inv_gamma, log_nu), nugget = 2, nugget_est = FALSE,
+res = RobustGaSP::log_marginal_lik_ppgasp(param = c(eta, tau), nugget = 2, nugget_est = TRUE,
                         R0 = R0, X = matrix(1, nrow = n), zero_mean = "No", 
-                        output = Yo, kernel_type = c(3,3), alpha = c(1.9,1.9))
+                        output = Yo, kernel_type = c(2,2), alpha = c(1.9,1.9))
 })
 c(res_vec[[1]], res[[1]])
+?RobustGaSP::log_marginal_lik_ppgasp
 # the likelihood are still the same
 ```
+
+```{r likelihood_titan}
+m = 199
+maxmin_order <- GpGp::order_maxmin(input_variables[,1:3])
+ordered_sample <- input_variables[maxmin_order,1:3]
+ordered_response <- pyroclastic_flow_heights[maxmin_order,]
+
+X_train_ordered = ordered_sample[1:200,]
+X_test_ordered = ordered_sample[201:683,]
+Y_train_ordered = ordered_response[1:200,] #which(loc_index[1,]==1)
+Y_test_ordered = ordered_response[201:683,]
+
+n=dim(Y_train_ordered)[1]
+n_testing=dim(Y_test_ordered)[1]
+
+##delete those location where all output are zero
+
+index_all_zero=NULL
+for(i_loc in 1:dim(Y_train_ordered)[2]){
+  if(sum(Y_train_ordered[,i_loc]==0)==200){
+    index_all_zero=c(index_all_zero,i_loc)
+  }
+}
+
+##transforming the output
+Y_train_ordered_log_1=log(Y_train_ordered+1)
+k=dim(Y_train_ordered_log_1[,-index_all_zero])[2]
+
+nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+gamma = runif(n = 3, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+eta = log(1/gamma)
+tau = log(nu)
+res_vec = neg_vecchia_marginal_log_likelihood(params = c(eta, tau), nu = 2, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), trend = cbind(rep(1,n),as.matrix(X_train_ordered)[,1]), isotropic = F, kernel_type = "pow_exp", alpha = 1.9, zero_mean = "No")
+R0 = generate_R0(as.matrix(X_train_ordered), as.matrix(X_train_ordered))
+res = RobustGaSP::log_marginal_lik_ppgasp(param = c(eta, tau), nugget = 2, nugget_est = TRUE,
+                        R0 = R0, X = cbind(rep(1,n),as.matrix(X_train_ordered)[,1]), zero_mean = "No", 
+                        output = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = c(1,1,1), alpha = c(1.9,1.9, 1.9))
+
+RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(eta, tau), nugget = 2, nugget_est = TRUE,
+                        R0 = R0, X = cbind(rep(1,n),as.matrix(X_train_ordered)[,1]), zero_mean = "Yes", 
+                        output = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = c(3,3,3), alpha = c(1.9,1.9, 1.9))
+neg_vecchia_marginal_log_likelihood_deriv(params = c(eta, tau), nu = 2, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), trend = cbind(rep(1,n),as.matrix(X_train_ordered)[,1]), isotropic = F, kernel_type = "matern_5_2", alpha = 1.9, zero_mean = "Yes")
+?RobustGaSP::log_marginal_lik_deriv_ppgasp
+gamma
+```
+
 
 ```{r likelihood_plot}
 # plot likelihood against gamma, nu, and m
 sourceCpp("src/demo.cpp")
 set.seed(2001)
-n = 500
+n = 1000
 np = 100 
 p = 5
 k = 10
-Xo = randomLHS(n = n+np, k = p)
+Xo = randomLHS(n = n, k = p)
 
 gamma_range = c(0.1, 2)
-sigma2_range = c(0.1, 1)
-nugget_range = c(0.1, 0.5)
-Yo <- matrix(0, nrow = n+np, ncol = k)
+sigma2_range = c(0.1, 0.5)
+nugget_range = c(0.1, 0.3)
+Yo <- matrix(0, nrow = n, ncol = k)
 for (i in 1:k){
   gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
   sigma2 = 1
   nugget = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
   
   Sigma = generate_covariance_matrix(Xo, gamma, alpha = 1.9, sigma2)
-  Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n+np)
+  Sigma_nugget = Sigma + sigma2 * nugget * diag(1, n)
 
   Y_i = rmvnorm(1, sigma=Sigma_nugget)
   Y_i = t(Y_i)
   Yo[,i] = Y_i
 }
 
-m = c(1, 5, round(seq(10, n-1, length.out = 50)))
+m = c(1, 5, seq(from = 10, to = 150, by = 10))
 
 maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
 ordered_Yo <- Yo[maxmin_order,]
 
-X_train <- ordered_sample[1:500,]
-X_test <- ordered_sample[501:600,]
-Y_train <- ordered_Yo[1:500,]
-Y_test <- ordered_Yo[501:600,]
-
+set.seed(2001)
 gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
 nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
-
-vec_list = c()
+eta = log(1/gamma)
+tau = log(nu)
+  
+lik_list = c()
 lik_time_list = c()
-train_time_list = c()
-pred_time_list = c()
-mse_list = c()
-pci_list = c()
-lci_list = c()
 for (i in 1:length(m)){
-  start_time = Sys.time()
   set.seed(2001)
-  nnmatrix <- GpGp::find_ordered_nn(X_train, m = m[i])
-  res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), nu = 1, nugget_est = TRUE, x = X_train, NNmatrix = 
-                                        nnmatrix, y = Y_train, 
-                                      kernel_type = "pow_exp", alpha = 1.9)
+  nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = 999)
+  start_time = Sys.time()
+  res_vec = fisher_loglik(params = c(eta, tau), tau = tau, nugget_est = TRUE, x = ordered_sample, NNmatrix = 
+                                        nnmatrix, y = ordered_Yo, 
+                                      kernel_type = "pow_exp", alpha = 1.9, trend = matrix(rep(1, n)), isotropic = F, zero_mean = "Yes")
   end_time = Sys.time()
   lik_time_used = as.numeric(end_time - start_time)
-  vec_list = c(vec_list, res_vec)
+  lik_list = c(lik_list, res_vec)
   lik_time_list = c(lik_time_list, lik_time_used)
-  
-  start_time = Sys.time()
-  set.seed(2001)
-  res = optim(par = c(gamma, nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = TRUE, x = X_train, NNmatrix = nnmatrix, y = Y_train, kernel_type = "pow_exp", alpha = 1.9, method = "L-BFGS-B")
-  end_time = Sys.time()
-  train_time_used = as.numeric(end_time - start_time)
-  train_time_list = c(train_time_list, train_time_used)
-  
-  start_time = Sys.time()
-  set.seed(2001)
-  nnmatrix_all = GpGp::find_ordered_nn(ordered_sample, m = m[i])
-  list = predict(x = X_train, xp = X_test, NNmatrix = nnmatrix_all, y = Y_train, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "pow_exp", alpha = 1.9, q = qnorm(0.975, 0, 1))
-  end_time = Sys.time()
-  pred_time_used = as.numeric(end_time - start_time)
-  pred_time_list = c(pred_time_list, pred_time_used)
-  
-  mse1 = mse(Y_test, list[[1]])
-  mse_list = c(mse_list, mse1)
-  pci1 = pci(Y_test, list[[2]], list[[3]])
-  pci_list = c(pci_list, pci1)
-  lci1 = lci(list[[2]], list[[3]])
-  lci_list = c(lci_list, lci1)
 }
-
-R0 = generate_R0(X_train, X_train)
-log_inv_gamma = log(1/gamma)
-
+R0 = generate_R0(ordered_sample, ordered_sample)
 start_time = Sys.time()
-res = RobustGaSP::log_marginal_lik_ppgasp(param = c(log_inv_gamma), nugget = nu, nugget_est = TRUE,
-                        R0 = R0, X = matrix(0, nrow = n), zero_mean = "No", 
-                        output = Y_train, kernel_type = c(1,1,1,1,1), alpha = c(1.9,1.9,1.9,1.9,1.9))
+res = RobustGaSP::log_marginal_lik_ppgasp(param = c(eta, tau), nugget = nu, nugget_est = TRUE,
+                        R0 = R0, X = matrix(0, nrow = n), zero_mean = "Yes", 
+                        output = ordered_Yo, kernel_type = c(1,1,1,1,1), alpha = c(1.9,1.9,1.9,1.9,1.9))
 end_time = Sys.time()
-as.numeric(end_time - start_time)
+ppgp_liktime = as.numeric(end_time - start_time)
 
-df = data.frame(m = m, loglik = vec_list)
-loglik = ggplot(df, aes(x = m, y = loglik)) + 
+df1 <- data.frame(m = m, loglik = lik_list)
+loglik <- ggplot(df1, aes(x = m, y = loglik)) + 
   geom_line(aes(color = "Vec-PPGP")) + 
   geom_point(aes(color = "Vec-PPGP")) + 
-  geom_hline(aes(yintercept = -res[[1]], color = "PPGP"), linetype = "dashed", size = 0.5) +
+  geom_hline(aes(yintercept = -res[[1]], color = "PPGP"),
+             linetype = "dashed", size = 0.5) +
   scale_color_manual(values = c("Vec-PPGP" = "black", "PPGP" = "red")) +
-  labs(x = "m", y = "Negative Log-Likelihood", title = "Negative Log-Likelihood versus the Number of Neighbors in Vec-PPGP", color = "Legend") + 
+  labs(
+    x = "m",
+    y = "Negative Log-Likelihood",
+    title = "Negative Log-Likelihood vs Number of Neighbors in Vec-PPGP",
+    color = "Legend"
+  ) +
   theme(plot.title = element_text(size = 10))
 
-
-df = data.frame(m = m, time = lik_time_list)
-time_plot = ggplot(df, aes(x = m, y = time)) + 
-  geom_line() + 
-  geom_point() + 
-  labs(x = "m", y = "Time (s)", title = "Likelihood Computation Time versus the Number of Neighbors in Vec-PPGP") + 
+df2 <- data.frame(m = m, time = lik_time_list)
+time_plot <- ggplot(df2, aes(x = m, y = time)) + 
+  geom_line(aes(color = "Vec-PPGP")) + 
+  geom_point(aes(color = "Vec-PPGP")) + 
+  geom_hline(aes(yintercept = ppgp_liktime, color = "PPGP"),
+             linetype = "dashed", size = 0.5) +
+  scale_color_manual(values = c("Vec-PPGP" = "black", "PPGP" = "red")) +
+  labs(
+    x = "m",
+    y = "Time (s)",
+    title = "Likelihood Computation Time vs Number of Neighbors in Vec-PPGP",
+    color = "Legend"
+  ) +
   theme(plot.title = element_text(size = 10))
 
-combined = (loglik + time_plot) + plot_layout(guides = "collect")
+df3 <- data.frame(m = m, loglik = lik_list)
+loglik <- ggplot(df1, aes(x = m, y = loglik)) + 
+  geom_line(aes(color = "Vec-PPGP")) + 
+  geom_point(aes(color = "Vec-PPGP")) + 
+  geom_hline(aes(yintercept = -res[[1]], color = "PPGP"),
+             linetype = "dashed", size = 0.5) +
+  scale_color_manual(values = c("Vec-PPGP" = "black", "PPGP" = "red")) +
+  labs(
+    x = "m",
+    y = "Negative Log-Likelihood",
+    title = "Fisher Log-Likelihood vs Number of Neighbors in Vec-PPGP",
+    color = "Legend"
+  ) +
+  theme(plot.title = element_text(size = 10))
+
+df4 <- data.frame(m = m, time = lik_time_list)
+time_plot <- ggplot(df4, aes(x = m, y = time)) + 
+  geom_line(aes(color = "Vec-PPGP")) + 
+  geom_point(aes(color = "Vec-PPGP")) + 
+  geom_hline(aes(yintercept = ppgp_liktime, color = "PPGP"),
+             linetype = "dashed", size = 0.5) +
+  scale_color_manual(values = c("Vec-PPGP" = "black", "PPGP" = "red")) +
+  labs(
+    x = "m",
+    y = "Time (s)",
+    title = "Fisher Log-likelihood Computation Time vs Number of Neighbors in Vec-PPGP",
+    color = "Legend"
+  ) +
+  theme(plot.title = element_text(size = 10))
+
+combined <- (loglik + time_plot) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "right")
 ggsave("combined.png", combined, width = 12, height = 5, dpi = 300)
-
-length(mse_list)
 #TODO: Pred time against m, mse against m, coverage probability with m, legnth with m.
 ```
 
@@ -797,7 +893,7 @@ set.seed(2001)
 n = 1500
 p = 5
 k = 10
-Xo = randomLHS(n = n, k = 5)
+Xo = randomLHS(n = n, k = p)
 
 gamma_range = c(0.1, 2)
 sigma2_range = c(0.1, 1)
@@ -820,21 +916,20 @@ maxmin_order <- GpGp::order_maxmin(Xo)
 ordered_sample <- Xo[maxmin_order,]
 nnmatrix <- GpGp::find_ordered_nn(ordered_sample, m = n-1)
 gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
-nu = 1
-
-res_vec = neg_vecchia_marginal_log_likelihood(params = c(gamma, nu), x = ordered_sample, NNmatrix = 
-                                        nnmatrix, y = Yo, 
-                                      alpha = 1.9)
+nu = 0.5
+eta = log(1/gamma)
+tau = log(nu)
+res_vec = neg_vecchia_marginal_log_likelihood(params = c(eta, tau), nu = 2, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = cbind(1, nrow = n), isotropic = F, kernel_type = "matern_3_2", alpha = 1.9, zero_mean = "No")
 
 R0 = generate_R0(ordered_sample, ordered_sample)
-log_inv_gamma = log(1/gamma)
 # the input type of kernel_type is wrong. It only takes integer, not string
-res = log_marginal_lik_ppgasp(param = c(log_inv_gamma, -1), nugget = 1, nugget_est = FALSE,
-                        R0 = R0, X = matrix(0, nrow = n), zero_mean = "Yes", 
-                        output = Yo, kernel_type = rep(1,5), alpha = rep(1.9,5))
+res = log_marginal_lik_ppgasp(param = c(eta, tau), nugget = 1, nugget_est = FALSE,
+                        R0 = R0, X = matrix(1, nrow = n), zero_mean = "No", 
+                        output = Yo, kernel_type = rep(2,10), alpha = rep(1.9,10))
 res[[1]]
 res_vec[[1]]
 # the results are the same up to a small error
+
 ```
 
 ```{r likelihood_parameters}
@@ -993,7 +1088,7 @@ $$\frac{\partial l(\gamma)}{\partial 1/\gamma} = \frac{\partial l(\gamma)}{\part
 ```{r deriv_2gamma_nugget}
 # check the derivative of the likelihood 2 gamma with nugget
 sourceCpp("src/demo.cpp")
-set.seed(2002)
+set.seed(2001)
 n = 500
 Xo = randomLHS(n = n, k = 2)
 
@@ -1018,10 +1113,10 @@ log_nu = log(nu)
 # since the input is the log of nugget-variance ratio, if the ratio is 1, then the input should 
 # be log(1) = 0. The length of alpha/kernel_type should be the same as gamma
 system.time({
-  log_like_deriv = RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, log_nu), nugget = nu, nugget_est = TRUE, R0 = R0, X = matrix(1, nrow = n), zero_mean = "No",output = Yo, kernel_type = c(1,1), alpha =c(1.9,1.9))
+  log_like_deriv = RobustGaSP::log_marginal_lik_deriv_ppgasp(param = c(log_inv_gamma, log_nu), nugget = nu, nugget_est = FALSE, R0 = R0, X = matrix(1, nrow = n), zero_mean = "No",output = Yo, kernel_type = c(2,2), alpha =c(1.9,1.9))
 })
-
-neg_vecchia_marginal_log_likelihood_deriv(c(log_inv_gamma,log_nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "pow_exp", alpha = 1.9, zero_mean = "No")
+?RobustGaSP::log_marginal_lik_deriv_ppgasp
+neg_vecchia_marginal_log_likelihood_deriv(c(gamma), nu = nu, nugget_est = FALSE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "matern_3_2", alpha = 1.9, zero_mean = "No")
 
 m_list = round(seq(1, 499, length.out = 200))
 time_list = c()
@@ -1046,8 +1141,8 @@ loglik = ggplot(df, aes(x = m, y = time)) +
 # check the derivative with mean
 sourceCpp("src/demo.cpp") 
 set.seed(2001)
-temp = generate_data(n = 500, p = 5, k = 5, gamma_range, sigma2_range, nugget_range)
-n = 500
+temp = generate_data(n = 1000, p = 5, k = 5, gamma_range, sigma2_range, nugget_range)
+n = 1000
 p = 5
 Xo = temp[[1]]
 Yo = temp[[2]]
@@ -1059,7 +1154,10 @@ nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
 eta = log(1/gamma)
 tau = log(nu)
 
-neg_vecchia_marginal_log_likelihood_deriv(c(gamma,nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "matern_3_2", alpha = 1.9, zero_mean = "No")
+system.time(
+  {neg_vecchia_marginal_log_likelihood_deriv(c(gamma,nu), nu = nu, nugget_est = TRUE, x = ordered_sample, NNmatrix = nnmatrix, y = Yo, trend = matrix(rep(1, n)), kernel_type = "matern_3_2", alpha = 1.9, zero_mean = "No")}
+)
+
 
 R0 = generate_R0(ordered_sample, ordered_sample)
 log_inv_gamma = log(1/gamma)
@@ -1121,7 +1219,7 @@ UUt[1:50, 100:150]
 # try different kernel type: pow_exp, matern_3_2, matern_5_2
 # generate the data in likelihood_large_scale chunk
 sourceCpp('src/demo.cpp')
-m = 50
+m = 25
 set.seed(2001)
 n = 1500
 p = 5
@@ -1142,25 +1240,31 @@ Y_test_ordered <- ordered_response[1001:1500,]
 nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
 nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
 
+set.seed(2001)
 gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
 nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
-
+eta = log(1/gamma)
+tau = log(nu)
+gamma_iso = runif(n = 1, min = gamma_range[1], max = gamma_range[2])
+eta_iso = log(1/gamma_iso)
 set.seed(2001)
 start_time = Sys.time()
-res = optim(par = c(gamma), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 5), nu = nu, nugget_est = FALSE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered,  method = "L-BFGS-B", kernel_type = "matern_3_2", alpha = 1.9, trend = matrix(1,1000,1), zero_mean = "No")
+res = optim(par = c(eta), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, nu = 0.2 , nugget_est = FALSE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered,  method = "L-BFGS-B", kernel_type = "matern_3_2", alpha = 1.9, trend = matrix(1,1000,1), isotropic = F, zero_mean = "Yes")
 end_time = Sys.time()
 end_time - start_time 
 # 19.89422 secs 30 eval
 
 ## Compare to PPGP 
 start_time <- Sys.time()
-m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget = nu, nugget.est = F, kernel_type = "matern_3_2", method = "mmle", zero.mean = "No", optimization = 'lbfgs')
+m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget = 0.2, nugget.est = F, kernel_type = "matern_3_2", isotropic=F, method = "mmle", zero.mean = "Yes", optimization = 'lbfgs')
 end_time <- Sys.time()
 end_time - start_time
+?ppgasp
 # Time difference without the nugget estimation is 37.43615 secs
 # With nugget estimation is 1.182473 mins
 
-list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[1:length(res$par)], nu = 1, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), zero_mean = "No")
+gamma_trained = exp(-res$par[1:length(res$par)])
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = gamma_trained, nu = 0.2, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), isotropic = F, zero_mean = "Yes")
 
 mse(Y_test_ordered, list[[1]])
 pci(Y_test_ordered, list[[2]], list[[3]])
@@ -1174,18 +1278,88 @@ lci(m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
 # Vecchia achieves similar performances with m = 50
 ```
 
+```{r lbfgs_repeat}
+time_mat_nug = matrix(0, nrow = 2, ncol = 20)
+mse_mat_nug = matrix(0, nrow = 2, ncol = 20)
+pci_mat_nug = matrix(0, nrow = 2, ncol = 20)
+lci_mat_nug = matrix(0, nrow = 2, ncol = 20)
+
+for (j in 1:20){
+  print(j)
+  m = 50
+  n = 1500
+  p = 5
+  k = 10
+  temp = generate_data(n, p, k, gamma_range, sigma2_range, nugget_range)
+  Xo = temp[[1]]
+  Yo = temp[[2]]
+  maxmin_order <- GpGp::order_maxmin(Xo)
+  ordered_sample <- Xo[maxmin_order,]
+  ordered_response <- Yo[maxmin_order,]
+  
+  X_train_ordered <- ordered_sample[1:1000,]
+  X_test_ordered <- ordered_sample[1001:1500,]
+  Y_train_ordered <- ordered_response[1:1000,]
+  Y_test_ordered <- ordered_response[1001:1500,]
+
+  nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+  nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+
+  gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+  nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+  eta = log(1/gamma)
+  tau = log(nu)
+  start_time <- Sys.time()
+  res = optim(par = c(eta, tau), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, nu = 0.2 , nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered,  method = "L-BFGS-B", kernel_type = "matern_3_2", alpha = 1.9, trend = matrix(1,1000,1), isotropic = F, zero_mean = "Yes")
+  end_time <- Sys.time()
+  time_j = end_time - start_time
+  learned_gamma = exp(-res$par[1:length(res$par)-1])
+  learned_nu = exp(res$par[length(res$par)])
+  
+  list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = learned_gamma, nu = learned_nu, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), isotropic = F, zero_mean = "Yes")
+  
+  mse_j = mse(Y_test_ordered, list[[1]])
+  pci_j = pci(Y_test_ordered, list[[2]], list[[3]])
+  lci_j = lci(list[[2]], list[[3]])
+  time_mat_nug[1,j] = time_j
+  mse_mat_nug[1,j] = mse_j
+  pci_mat_nug[1,j] = pci_j
+  lci_mat_nug[1,j] = lci_j
+  
+  start_time <- Sys.time()
+  m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget.est = T, kernel_type = "matern_3_2", isotropic=F, method = "mmle", zero.mean = "Yes", optimization = 'lbfgs')
+  end_time <- Sys.time()
+  time_j = end_time - start_time
+  
+  m_pred.ppgasp = RobustGaSP::predict(m.ppgasp, testing_input = X_test_ordered)
+  mse_j = mse(Y_test_ordered, m_pred.ppgasp$mean)
+  pci_j = pci(Y_test_ordered, m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+  lci_j = lci(m_pred.ppgasp$lower95, m_pred.ppgasp$upper95)
+  
+  time_mat_nug[2,j] = time_j
+  mse_mat_nug[2,j] = mse_j
+  pci_mat_nug[2,j] = pci_j
+  lci_mat_nug[2,j] = lci_j
+}
+median(lci_mat_nug[1,])
+(max(lci_mat[1,]) - median(lci_mat[1,]))
+(median(lci_mat[1,]) - min(lci_mat[1,]))
+```
+
 ```{r pred_est_nugget}
 # this code trains and predicts on the simulated data with estimated nugget
 sourceCpp("src/demo.cpp")
 
 set.seed(2001)
 start_time = Sys.time()
-res = optim(par = c(gamma, nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), method = "L-BFGS-B", nu = nu, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2",alpha = 1.9, trend = matrix(1,1000,1), zero_mean = "No")
+res = optim(par = c(eta, tau), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, method = "L-BFGS-B", nu = nu, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2",alpha = 1.9, trend = matrix(1,1000,1), isotropic = F, zero_mean = "Yes")
 end_time = Sys.time()
 end_time - start_time
 # Time difference of 47.37236 secs
 
-list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), zero_mean = "No")
+gamma_trained = exp(-res$par[1:length(res$par)-1])
+nu_trained = exp(res$par[length(res$par)])
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = gamma_trained, nu = nu_trained, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), isotropic = F, zero_mean = "Yes")
 
 mse(Y_test_ordered, list[[1]])
 pci(Y_test_ordered, list[[2]], list[[3]])
@@ -1193,7 +1367,7 @@ lci(list[[2]], list[[3]])
 
 ## Compare to PPGP 
 start_time <- Sys.time()
-m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget.est = T, kernel_type = "matern_3_2", zero.mean = "No", method = "mmle", optimization = 'lbfgs')
+m.ppgasp=ppgasp(design=X_train_ordered, response=Y_train_ordered, nugget.est = T, kernel_type = "matern_3_2", isotropic = F, zero.mean = "Yes", method = "mmle", optimization = 'lbfgs')
 end_time <- Sys.time()
 end_time - start_time
 # Time difference of 1.729538 mins
@@ -1236,7 +1410,176 @@ Y_train_ordered_log_1=log(Y_train_ordered+1)
 k=dim(Y_train_ordered_log_1[,-index_all_zero])[2]
 
 # 
+system.time(
+  for(i in 1:1){
+    m.ppgasp=ppgasp(design=X_train_ordered,
+                    response=as.matrix(Y_train_ordered_log_1[,-index_all_zero]),
+                    trend=cbind(rep(1,n),X_train_ordered[,1]),
+                    nugget.est=T,max_eval=100,num_initial_values=1,
+                    optimization='lbfgs')
+    pred_ppgasp=predict.ppgasp(m.ppgasp,X_test_ordered,
+                               testing_trend=cbind(rep(1,n_testing),
+                                                   X_test_ordered[,1]))
+    ##transforming back for prediction
+    
+    m_pred_ppgasp_mean=exp(pred_ppgasp$mean)-1
+    m_pred_ppgasp_LB=exp(pred_ppgasp$lower95)-1
+    m_pred_ppgasp_UB=exp(pred_ppgasp$upper95)-1
+    
+    m_pred_ppgasp_mean[which(m_pred_ppgasp_mean<0)]=0
+    m_pred_ppgasp_LB[which(m_pred_ppgasp_LB<0)]=0
+    m_pred_ppgasp_UB[which(m_pred_ppgasp_UB<0)]=0
+  }
+)
+# time used 164.487 s for n = 200
+# 12.488s for n = 50 
 
+mse(as.matrix(Y_test_ordered[,-index_all_zero]), m_pred_ppgasp_mean)
+pci(as.matrix(Y_test_ordered[,-index_all_zero]), m_pred_ppgasp_LB, m_pred_ppgasp_UB)
+lci(m_pred_ppgasp_LB, m_pred_ppgasp_UB)
+
+# plot ppgp 200
+pred_all_n200=matrix(0,dim(Y_test_ordered)[1],dim(Y_test_ordered)[2])
+pred_all_n200[,-index_all_zero]= m_pred_ppgasp_mean
+
+test_index=1
+pred_test_height=as.numeric(t(matrix(pred_all[test_index,],144,160)))
+true_test_height=as.numeric(t(matrix(Y_test_ordered[test_index,],144,160)))
+
+data.grid <- expand.grid(s1 = seq(1, 160, length.out=160), s2 = seq(1, 144, length.out=144))
+pred.test<- cbind(data.grid, height = pred_test_height)
+true.test<- cbind(data.grid, height = true_test_height)
+
+#pdf('pred_true_1.pdf',height=1.44*2,width=1.60*2)
+ggplot(pred.test, aes(x = s1, y = s2, z = height)) +
+  stat_contour(color = 'blue',breaks = 1)+  
+  stat_contour(data = true.test, aes(x = s1, y = s2, z = height),color = 'red',breaks = 1)+
+  scale_x_continuous(minor_breaks=0, breaks=seq(0,160,40),limits=c(0,160)) + scale_y_continuous(minor_breaks=0, breaks=seq(0,144,144/4),limits=c(0,144))
+
+nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+
+set.seed(2001)
+gamma = runif(n = 3, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+eta = log(1/gamma)
+tau = log(nu)
+
+# eta_works = c(-0.5125756, -0.4897659, -0.5460470)
+# tau_works = -0.2252633
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(eta,tau), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, method = "L-BFGS-B", nu = 1, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "matern_5_2", alpha = 1.9, trend=cbind(rep(1,n),X_train_ordered[,1]), isotropic = F, zero_mean = "No")
+end_time = Sys.time()
+end_time - start_time
+# Time difference of 19.48 s for m = 30
+
+gamma_trained = exp(-res$par[-length(res$par)])
+nu_trained = exp(res$par[length(res$par)])
+start_time = Sys.time()
+list = predict(x = as.matrix(X_train_ordered), xp = as.matrix(X_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), gamma = gamma_trained, nu = nu_trained, kernel_type = "matern_5_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = cbind(rep(1,n),X_train_ordered[,1]), testing_trend = cbind(rep(1,n_testing),X_test_ordered[,1]), isotropic = F,  zero_mean = "No")
+end_time = Sys.time()
+end_time - start_time
+
+# transform back
+vec_ppgasp_mean=exp(list[[1]])-1
+vec_ppgasp_LB=exp(list[[2]])-1
+vec_ppgasp_UB=exp(list[[3]])-1
+vec_ppgasp_mean[which(vec_ppgasp_mean<0)]=0
+vec_ppgasp_LB[which(vec_ppgasp_LB<0)]=0
+vec_ppgasp_UB[which(vec_ppgasp_UB<0)]=0
+
+mse(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_mean)
+pci(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_LB, vec_ppgasp_UB)
+lci(vec_ppgasp_LB, vec_ppgasp_UB)
+
+pred_all_m25=matrix(0,dim(Y_test_ordered)[1],dim(Y_test_ordered)[2])
+pred_all_m25[,-index_all_zero]= vec_ppgasp_mean
+
+test_index=1
+pred_test_height=as.numeric(t(matrix(pred_all[test_index,],144,160)))
+true_test_height=as.numeric(t(matrix(Y_test_ordered[test_index,],144,160)))
+
+pred.test<- cbind(data.grid, height = pred_test_height)
+true.test<- cbind(data.grid, height = true_test_height)
+```
+
+```{r plot_real_data}
+pred_all_m25
+pred_all_m50
+pred_all_n50
+pred_all_n200
+
+test_index=1
+pred_n200_test_height=as.numeric(t(matrix(pred_all_n200[test_index,],144,160)))
+pred.test_n200 <- cbind(data.grid, height = pred_n200_test_height)
+p_n200 <- ggplot(pred.test_n200, aes(x = s1, y = s2, z = height)) +
+  stat_contour(color = 'blue',breaks = 1)+  
+  stat_contour(data = true.test, aes(x = s1, y = s2, z = height),color = 'red',breaks = 1)+
+  scale_x_continuous(minor_breaks=0, breaks=seq(0,160,40),limits=c(0,160)) + scale_y_continuous(minor_breaks=0, breaks=seq(0,144,144/4),limits=c(0,144))
+
+pred_m50_test_height=as.numeric(t(matrix(pred_all_m50[test_index,],144,160)))
+pred.test_m50 <- cbind(data.grid, height = pred_m50_test_height)
+p_m50 <- ggplot(pred.test_m50, aes(x = s1, y = s2, z = height)) +
+  stat_contour(color = 'blue',breaks = 1)+  
+  stat_contour(data = true.test, aes(x = s1, y = s2, z = height),color = 'red',breaks = 1)+
+  scale_x_continuous(minor_breaks=0, breaks=seq(0,160,40),limits=c(0,160)) + scale_y_continuous(minor_breaks=0, breaks=seq(0,144,144/4),limits=c(0,144))
+
+pred_m25_test_height=as.numeric(t(matrix(pred_all_m25[test_index,],144,160)))
+pred.test_m25 <- cbind(data.grid, height = pred_m25_test_height)
+p_m25 <- ggplot(pred.test_m25, aes(x = s1, y = s2, z = height)) +
+  stat_contour(color = 'blue',breaks = 1)+  
+  stat_contour(data = true.test, aes(x = s1, y = s2, z = height),color = 'red',breaks = 1)+
+  scale_x_continuous(minor_breaks=0, breaks=seq(0,160,40),limits=c(0,160)) + scale_y_continuous(minor_breaks=0, breaks=seq(0,144,144/4),limits=c(0,144))
+
+pred_n50_test_height=as.numeric(t(matrix(pred_all_n50[test_index,],144,160)))
+pred.test_n50 <- cbind(data.grid, height = pred_n50_test_height)
+p_n50 <- ggplot(pred.test_n50, aes(x = s1, y = s2, z = height)) +
+  stat_contour(color = 'blue',breaks = 1)+  
+  stat_contour(data = true.test, aes(x = s1, y = s2, z = height),color = 'red',breaks = 1)+
+  scale_x_continuous(minor_breaks=0, breaks=seq(0,160,40),limits=c(0,160)) + scale_y_continuous(minor_breaks=0, breaks=seq(0,144,144/4),limits=c(0,144))
+
+# Remove axis titles from individual plots
+p1_clean <- p_n200 + theme(axis.title = element_blank())
+p2_clean <- p_m50 + theme(axis.title = element_blank())
+p3_clean <- p_m25 + theme(axis.title = element_blank())
+p4_clean <- p_n50 + theme(axis.title = element_blank())
+
+# Combine in 1-row layout
+combined <- (p1_clean | p2_clean) /
+    (p3_clean | p4_clean)
+
+labeled <- ggdraw(combined) +
+  draw_label("W/E", x = 0.5, y = 0, vjust = -0.5, size = 8) +
+  draw_label("S/N", x = 0, y = 0.5, angle = 90, vjust = 1.5, size = 8)
+# Display or save
+print(labeled)
+ggsave("titan_pred.png", labeled, width = 8, height = 8)
+```
+
+
+```{r ppgp_real_50}
+X_train_ordered = ordered_sample[1:50,]
+X_test_ordered = ordered_sample[51:683,]
+Y_train_ordered = ordered_response[1:50,] #which(loc_index[1,]==1)
+Y_test_ordered = ordered_response[51:683,]
+n=dim(Y_train_ordered)[1]
+n_testing=dim(Y_test_ordered)[1]
+
+##delete those location where all output are zero
+
+index_all_zero=NULL
+for(i_loc in 1:dim(Y_train_ordered)[2]){
+  if(sum(Y_train_ordered[,i_loc]==0)==50){
+    index_all_zero=c(index_all_zero,i_loc)
+  }
+}
+
+##transforming the output
+Y_train_ordered_log_1=log(Y_train_ordered+1)
+k=dim(Y_train_ordered_log_1[,-index_all_zero])[2]
+
+# 
 system.time(
   for(i in 1:1){
     m.ppgasp=ppgasp(design=X_train_ordered,
@@ -1265,44 +1608,39 @@ mse(as.matrix(Y_test_ordered[,-index_all_zero]), m_pred_ppgasp_mean)
 pci(as.matrix(Y_test_ordered[,-index_all_zero]), m_pred_ppgasp_LB, m_pred_ppgasp_UB)
 lci(m_pred_ppgasp_LB, m_pred_ppgasp_UB)
 
-nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
-nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+pred_all=matrix(0,dim(Y_test_ordered)[1],dim(Y_test_ordered)[2])
+pred_all[,-index_all_zero]= m_pred_ppgasp_mean
 
-gamma = runif(n = 3, min = gamma_range[1], max = gamma_range[2])
-nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+test_index=1
+pred_test_height=as.numeric(t(matrix(pred_all[test_index,],144,160)))
+true_test_height=as.numeric(t(matrix(Y_test_ordered[test_index,],144,160)))
 
-set.seed(2001)
-start_time = Sys.time()
-res = optim(par = c(gamma,nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-5, 4), method = "L-BFGS-B", nu = 1, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "matern_3_2", alpha = 1.9, trend=cbind(rep(1,n),X_train_ordered[,1]), zero_mean = "No")
-end_time = Sys.time()
-end_time - start_time
-# Time difference of 19.48 s for m = 30
+data.grid <- expand.grid(s1 = seq(1, 160, length.out=160), s2 = seq(1, 144, length.out=144))
+pred.test<- cbind(data.grid, height = pred_test_height)
+true.test<- cbind(data.grid, height = true_test_height)
 
-list = predict(x = as.matrix(X_train_ordered), xp = as.matrix(X_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = cbind(rep(1,n),X_train_ordered[,1]), testing_trend = cbind(rep(1,n_testing),X_test_ordered[,1]), zero_mean = "No")
-
-# transform back
-vec_ppgasp_mean=exp(list[[1]])-1
-vec_ppgasp_LB=exp(list[[2]])-1
-vec_ppgasp_UB=exp(list[[3]])-1
-vec_ppgasp_mean[which(vec_ppgasp_mean<0)]=0
-vec_ppgasp_LB[which(vec_ppgasp_LB<0)]=0
-vec_ppgasp_UB[which(vec_ppgasp_UB<0)]=0
-
-mse(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_mean)
-pci(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_LB, vec_ppgasp_UB)
-lci(vec_ppgasp_LB, vec_ppgasp_UB)
-
-temp = neg_vecchia_marginal_log_likelihood_deriv(params = c(0.362137,2.35245,0.563513,0.110119), nu = 1, nugget_est = TRUE, x = as.matrix(X_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "pow_exp", alpha = 1.9, trend=cbind(rep(1,n),X_train_ordered[,1]), zero_mean = "No")
+#pdf('pred_true_1.pdf',height=1.44*2,width=1.60*2)
+ggplot(pred.test, aes(x = s1, y = s2, z = height)) +
+  stat_contour(color = 'blue',breaks = 1)+  
+  stat_contour(data = true.test, aes(x = s1, y = s2, z = height),color = 'red',breaks = 1)+
+  scale_x_continuous(minor_breaks=0, breaks=seq(0,160,40),limits=c(0,160)) + scale_y_continuous(minor_breaks=0, breaks=seq(0,144,144/4),limits=c(0,144))
+#dev.off()
 ```
+
 
 ```{r diff_ordering}
 # try different orderings on simulated and real datasets
 sourceCpp("src/demo.cpp")
-temp = generate_data(n=1500, p =5, k=10, gamma_range = c(0.1, 2), sigma2_range = c(0.1, 1),nugget_range = c(0.1, 2))
+time_mat = matrix(0, nrow = 4, ncol = 20)
+mse_mat = matrix(0, nrow = 4, ncol = 20)
+pci_mat = matrix(0, nrow = 4, ncol = 20)
+lci_mat = matrix(0, nrow = 4, ncol = 20)
+
+for (j in 1:40){
+  temp = generate_data(n=1500, p =5, k=10, gamma_range = c(0.1, 2), sigma2_range = c(0.1, 0.5),nugget_range = c(0.1, 0.3))
 Xo = temp[[1]]
 Yo = temp[[2]]
 m = 50
-set.seed(2001)
 maxmin_order <- GpGp::order_maxmin(Xo)
 middleout_order <- GpGp::order_middleout(Xo)
 coor_sum_order <- GpGp::order_coordinate(Xo)
@@ -1313,26 +1651,30 @@ mse_list = c()
 pci_list = c()
 lci_list = c()
 
-for (i in list(maxmin_order, middleout_order, coor_sum_order, random_order)){
-  ordered_sample <- Xo[i,]
-  ordered_response <- Yo[i,]
+for (i in 1:4){
+  order = list(maxmin_order, middleout_order, coor_sum_order, random_order)[i]
+  ordered_sample <- Xo[order,]
+  ordered_response <- Yo[order,]
   X_train_ordered <- ordered_sample[1:1000,]
   X_test_ordered <- ordered_sample[1001:1500,]
   Y_train_ordered <- ordered_response[1:1000,]
   Y_test_ordered <- ordered_response[1001:1500,]
   
-  set.seed(2001)
   nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
   nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
   gamma = runif(n = 5, min = 0.1, max = 2)
   nu = runif(n = 1, min = 0.1, max = 2)
+  eta = log(1/gamma)
+  tau = log(nu)
   
   start_time = Sys.time()
-  res = optim(par = c(gamma,nu), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, lower = rep(10e-9, 6), nu = 1, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, kernel_type = "pow_exp", y = Y_train_ordered, alpha = 1.9, method = "L-BFGS-B")
+  res = optim(par = c(eta,tau), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, nu = 1, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, kernel_type = "matern_3_2", y = Y_train_ordered, alpha = 1.9, method = "L-BFGS-B", trend = matrix(1,1000,1), isotropic = F, zero_mean = "Yes")
   end_time = Sys.time()
   time_list = c(time_list, as.numeric(end_time - start_time))
   
-  list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = res$par[-length(res$par)], nu = res$par[length(res$par)], kernel_type = "pow_exp", alpha = 1.9, q = qnorm(0.975, 0, 1))
+  gamma_trained = exp(-res$par[-length(res$par)])
+  nu_trained = exp(res$par[length(res$par)])
+  list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = gamma_trained, nu = nu_trained, kernel_type = "matern_3_2", trend = matrix(1,1000,1), testing_trend = matrix(1, 500, 1), isotropic = F, zero_mean = "Yes", alpha = 1.9, q = qnorm(0.975, 0, 1))
   
   mse_i = mse(Y_test_ordered, list[[1]])
   pci_i = pci(Y_test_ordered, list[[2]], list[[3]])
@@ -1341,55 +1683,20 @@ for (i in list(maxmin_order, middleout_order, coor_sum_order, random_order)){
   pci_list = c(pci_list, pci_i)
   lci_list = c(lci_list, lci_i)
 }
-
-neg_vecchia_marginal_log_likelihood_deriv(params = gamma, nu = 1, nugget_est = FALSE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "pow_exp",alpha = 1.9, trend = matrix(1,1000, 1),zero_mean = "No")
-
-time_list
-mse_list
-pci_list
-lci_list
-??ppgasp
-```
-
-```{r}
-#TODO: new find order function
-#TODO: add mean function
-#TODO: (Matern_5_2 deriv is a littl bit off)
-#TODO: add illustration of different ordering
-#TODO: try different ordering and compare the resutls. 
-sourceCpp("src/demo.cpp")
-Xo = randomLHS(n = 2, k = 5)
-x1 = matrix(Xo[1,], nrow = 1)
-x2 = matrix(Xo[2,], nrow = 1)
-gamma = runif(5)
-Matern_3_2_Sep(x1, x2, gamma = gamma, nu = 1, alpha = 1.9)
-
-?GpGp::order_middleout
-?RobustGaSP::ppgasp()
-```
-
-```{r}
-# sin function to test scalability
-n = 10e4
-k = 100
-set.seed(2001)
-# Create input domain
-x <- seq(0, 2 * pi, length.out = 200)
-
-# Initialize matrix to hold functions
-sine_functions <- matrix(0, nrow = 100, ncol = length(x))
-
-# Generate 100 sine curves with variation
-for (i in 1:100) {
-  amplitude <- runif(1, 0.5, 1.5)
-  frequency <- runif(1, 0.8, 1.2)
-  phase <- runif(1, 0, 2 * pi)
-  sine_functions[i, ] <- amplitude * sin(frequency * x + phase)
+time_mat[i,j] = time_list
+mse_mat[i,j] = mse_list
+pci_mat[i,j] = pci_list
+lci_mat[i,j] = lci_list
 }
 
-# Plot a subset (e.g. 20) for visualization
-matplot(x, t(sine_functions[1:20, ]), type = "l", lty = 1, col = rainbow(20),
-        xlab = "x", ylab = "f(x)", main = "Sample of 100 Sine Functions")
+middleout_time <- c(middleout_time, time_mat)
+middleout_mse <- c(middleout_mse, mse_mat)
+middleout_pci <- c(middleout_pci, pci_mat)
+middleout_lci <- c(middleout_lci,lci_mat)
+
+max(middleout_lci) - median(middleout_lci)
+median(middleout_lci) - min(middleout_lci)
+median(middleout_lci)
 ```
 
 ```{r fisher_syn_data}
@@ -1398,7 +1705,7 @@ m = 50
 set.seed(2001)
 n = 1500
 p = 5
-k = 5
+k = 10
 temp = generate_data(n, p, k, gamma_range, sigma2_range, nugget_range)
 Xo = temp[[1]]
 Yo = temp[[2]]
@@ -1412,71 +1719,415 @@ Y_train_ordered <- ordered_response[1:1000,]
 Y_test_ordered <- ordered_response[1001:1500,]
 
 # try: train with small m, predict with larger m 
+set.seed(2001)
 nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
 nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
 
+set.seed(2001)
 gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
 nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
 eta = log(1/gamma)
 tau = log(nu)
 
-temp = fisher_scoring(params = c(eta,tau), tau = tau , nugget_est = TRUE, x = X_train_ordered,
+temp = fisher_loglik(params = c(eta,tau), tau = tau , nugget_est = TRUE, x = X_train_ordered,
                NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2", alpha = 1.9,
-               trend = matrix(1, nrow = 1000, 1), zero_mean = "No")
+               trend = matrix(1, nrow = 1000, 1), isotropic = F, zero_mean = "Yes")
 
+temp1 = fisher_scoring1(params = c(eta,tau), tau = tau , nugget_est = TRUE, x = X_train_ordered,
+               NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2", alpha = 1.9,
+               trend = matrix(1, nrow = 1000, 1), isotropic = F, zero_mean = "Yes")
 
-temp2_inv = solve(temp[[2]])
-temp1_vec = matrix(temp[[1]], byrow = TRUE)
-temp2_inv %*% temp1_vec
-
-temp = neg_vecchia_marginal_log_likelihood_deriv(params = c(gamma, nu), nu = nu, nugget_est = TRUE, x = X_train_ordered, NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2",alpha = 1.9, trend = matrix(1,1000, 1),zero_mean = "No")
-
-fisher <- function(ini_param, tau, nugget_est, x, NNmatrix, y, kernel_type, alpha, trend, zero_mean, max_iter = 40, tol = 1e-4){
+fisher <- function(ini_param, tau, nugget_est, x, NNmatrix, y, kernel_type, alpha, trend, zero_mean, isotropic, max_iter = 100, tol = 1e-4, beta = 1, rho = 0.1){
+  p = length(ini_param) - 1
   tau = ini_param[length(ini_param)]
   params = ini_param
-  iter = 0
+  iter = 1
   while (iter <= max_iter) {
-    temp = fisher_scoring(params = params, tau = tau , nugget_est = nugget_est, x = x,
-                 NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
-                 trend = trend, zero_mean = zero_mean)
-    update = solve(temp[[2]], matrix(temp[[1]], byrow = TRUE))
-    new_params = params - update
-    
     gamma = exp(-params[1:(length(params)-1)])
     nu = exp(params[length(params)])
     print(paste("Iter ", iter))
     print(paste("Params", c(gamma, nu)))
-    print(paste("Update", update))
-    print(paste("norm", norm(update, type = "2") ))
-    if (norm(update, type = "2") < tol ){
-      return(new_params)
-    } else{
-      params = new_params
-      iter = iter + 1
+    # print(paste("log-Params", params))
+    temp = fisher_scoring1(params = params, tau = tau , nugget_est = nugget_est, x = x,
+                 NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
+                 trend = trend, isotropic, zero_mean = zero_mean)
+    loglik = temp[[1]]
+    print(paste("loglik", loglik))
+    info = temp[[3]]
+    # print("info")
+    # print(info)
+    # print(paste("condition number:", condition_number(info)))
+    grad = matrix(temp[[2]], byrow = TRUE)
+    # print("grad")
+    # print(grad)
+    cond_tol <- 1e-6
+    if (condition_number(info) > 1 / tol) {
+            # print("info matrix is ill-conditioned")
+            # #info <- 1.0*max(likobj0$info)*diag(nrow(likobj0$info))
+            # # regularize
+            ee <- eigen(info)
+            ee_ratios <- ee$values/max(ee$values)
+            ee_ratios[ ee_ratios < 1e-6 ] <- 1e-6
+            ee$values <- max(ee$values)*ee_ratios
+            info <- ee$vectors %*% diag(ee$values) %*% t(ee$vectors)
+            # #diag(info) <- diag(info) + tol*max(diag(info))
     }
+      update = solve(info, grad);
+      # print(paste("update", update))
+      # if (mean(update^2) > 1) {
+      #         update <- update/sqrt(mean(update^2))
+      # }
+      new_params = params + update
+      loglik_new = fisher_loglik(params = new_params, tau = new_params[length(new_params)] , nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
+               trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+    print(paste("loglik_new", loglik_new))
+    if( !is.na(loglik_new) && loglik > loglik_new || abs(loglik_new - loglik) / abs(loglik) < 0.001){
+             update <- 0.1*update
+             new_params <- params + update
+             loglik_new <- fisher_loglik(params = new_params, tau = new_params[length(new_params)] , nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
+                  trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+        print(paste("loglik_new1", loglik_new))
+    }
+    # # check again, move along gradient
+
+    if( !is.na(loglik_new) && loglik > loglik_new || abs(loglik_new - loglik) / abs(loglik) < 0.001){
+        info0 <- diag(rep(mean(diag(info)),nrow(info)) )
+         update <- solve(info0,grad)
+      #    if (mean(update^2) > 1) {
+      #         update <- update/sqrt(mean(update^2))
+      # }
+        new_params <- params + update
+        loglik_new <- fisher_loglik(params = new_params, tau = new_params[length(new_params)] , nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
+                  trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+        print(paste("loglik_new2", loglik_new))
+    }
+   # check once move, take smaller step along gradient
+    if(!is.na(loglik_new) && loglik > loglik_new || abs(loglik_new - loglik) / abs(loglik) < 0.001){
+        info0 <- diag( rep(max(diag(info)),nrow(info)) )
+        update <- solve(info0,grad)
+        # if (mean(update^2) > 1) {
+        #     update <- update/sqrt(mean(update^2))
+        # }
+        new_params <- params + update
+        loglik_new <- fisher_loglik(params = new_params, tau = new_params[length(new_params)] , nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
+                 trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+        print(paste("loglik_new3", loglik_new))
+    }
+
+    if (!is.na(loglik_new) && loglik > loglik_new || abs(loglik_new - loglik) / abs(loglik) < 0.001){
+      # gradient descent with line search
+      beta = 1
+      max_ls_iter = 20
+      ls_iter = 0
+      update = grad
+      print(paste("grad", grad))
+      loglik_beta = fisher_loglik(params = params + beta * update, tau = 1,
+                               nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y,
+                               kernel_type = kernel_type, alpha = 1.9,
+                               trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+      print(paste("loglik_beta", loglik_beta))
+      repeat {
+        print(ls_iter)
+        if (is.na(loglik_beta)){
+          beta <- rho * beta
+          loglik_beta = fisher_loglik(params = params + beta * update, tau = 1,
+                                   nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y,
+                                   kernel_type = kernel_type, alpha = 1.9,
+                                   trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+          ls_iter = ls_iter + 1
+        } else if (loglik_beta <= loglik){
+          beta <- rho * beta
+          loglik_beta = fisher_loglik(params = params + beta * update, tau = 1,
+                                   nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y,
+                                   kernel_type = kernel_type, alpha = 1.9,
+                                   trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+          ls_iter = ls_iter + 1
+        } else {
+          break
+        }
+        if (ls_iter > max_ls_iter){
+          break
+        }
+      }
+      new_params <- params + beta * update
+      loglik_new <- fisher_loglik(params = new_params, tau = new_params[length(new_params)] , nugget_est = nugget_est, x = x, NNmatrix = NNmatrix, y = y, kernel_type = kernel_type, alpha = 1.9,
+                 trend = trend, isotropic = isotropic, zero_mean = zero_mean)
+      print(paste("beta", beta))
+      print(paste("loglik_new5", loglik_new))
+    }
+    if (!is.na(loglik_new) && loglik > loglik_new || abs(loglik_new - loglik) / abs(loglik) < 0.001){
+      print("6")
+      return(params)
+    }
+    # if (norm(update, type = "2") < tol ){
+    #   return(params)
+    # } else{
+    params = new_params
+    iter = iter + 1
   }
+  return(params)
 }
 start_time <- Sys.time()
 temp = fisher(ini_param = c(eta,tau), tau = tau , nugget_est = TRUE, x = X_train_ordered,
                NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2", alpha = 1.9,
-               trend = matrix(1, nrow = 1000, 1), zero_mean = "No")
+               trend = matrix(1, nrow = 1000, 1), isotropic = F, zero_mean = "Yes")
 end_time <- Sys.time()
 end_time - start_time
-list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = gamma, nu = nu, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), zero_mean = "No")
+learned_gamma = exp(-temp[1:length(temp)-1])
+learned_nu = exp(temp[length(temp)])
 
-eta = c(0.028116903, 0.007682817, 0.076552645, 0.004405645, 0.015995200)
-gamma = exp(-eta)
-tau = 0.141721169
-nu = exp(tau)
+list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = learned_gamma, nu = learned_nu, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), isotropic = F, zero_mean = "Yes")
 
 mse(Y_test_ordered, list[[1]])
 pci(Y_test_ordered, list[[2]], list[[3]])
 lci(list[[2]], list[[3]])
 ```
 
+```{r fisher_repeat}
+time_mat = matrix(0, nrow = 1, ncol = 20)
+mse_mat = matrix(0, nrow = 1, ncol = 20)
+pci_mat = matrix(0, nrow = 1, ncol = 20)
+lci_mat = matrix(0, nrow = 1, ncol = 20)
+
+
+for (j in 1:20){
+  m = 50
+  n = 1500
+  p = 5
+  k = 10
+  temp = generate_data(n, p, k, gamma_range, sigma2_range, nugget_range)
+  Xo = temp[[1]]
+  Yo = temp[[2]]
+  maxmin_order <- GpGp::order_maxmin(Xo)
+  ordered_sample <- Xo[maxmin_order,]
+  ordered_response <- Yo[maxmin_order,]
+  
+  X_train_ordered <- ordered_sample[1:1000,]
+  X_test_ordered <- ordered_sample[1001:1500,]
+  Y_train_ordered <- ordered_response[1:1000,]
+  Y_test_ordered <- ordered_response[1001:1500,]
+
+  nnmatrix_all <- GpGp::find_ordered_nn(ordered_sample, m = m)
+  nnmatrix_train <- GpGp::find_ordered_nn(X_train_ordered, m = m)
+
+  gamma = runif(n = p, min = gamma_range[1], max = gamma_range[2])
+  nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+  eta = log(1/gamma)
+  tau = log(nu)
+  start_time <- Sys.time()
+  temp = fisher(ini_param = c(eta,tau), tau = tau , nugget_est = TRUE, x = X_train_ordered,
+                 NNmatrix = nnmatrix_train, y = Y_train_ordered, kernel_type = "matern_3_2", alpha = 1.9,
+                 trend = matrix(1, nrow = 1000, 1), isotropic = F, zero_mean = "Yes")
+  end_time <- Sys.time()
+  time_j = end_time - start_time
+  learned_gamma = exp(-temp[1:length(temp)-1])
+  learned_nu = exp(temp[length(temp)])
+  
+  list = predict(x = X_train_ordered, xp = X_test_ordered, NNmatrix = nnmatrix_all, y = Y_train_ordered, gamma = learned_gamma, nu = learned_nu, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = matrix(1,1000,1), testing_trend = matrix(1,500,1), isotropic = F, zero_mean = "Yes")
+  
+  mse_j = mse(Y_test_ordered, list[[1]])
+  pci_j = pci(Y_test_ordered, list[[2]], list[[3]])
+  lci_j = lci(list[[2]], list[[3]])
+  time_mat[,j] = time_j
+  mse_mat[,j] = mse_j
+  pci_mat[,j] = pci_j
+  lci_mat[,j] = lci_j
+}
+
+median(lci_mat)
+max(lci_mat) - median(lci_mat)
+median(lci_mat) - min(lci_mat)
+```
+
+
 ```{r fisher_real_data}
+sourceCpp("src/demo.cpp")
+set.seed(2001)
+gamma = runif(n = 3, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+eta = log(1/gamma)
+tau = log(nu)
+start_time <- Sys.time()
+temp = fisher(ini_param = c(eta,tau), tau = tau , nugget_est = TRUE, x = as.matrix(X_train_ordered),
+               NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "matern_3_2", alpha = 1.9,
+               trend = cbind(rep(1,n),X_train_ordered[,1]), isotropic = F, zero_mean = "No",
+              learning_rate = 0.00001)
+end_time <- Sys.time()
+end_time - start_time
+
+temp = fisher_loglik(params = c(eta,tau), tau = tau , nugget_est = TRUE, x = as.matrix(X_train_ordered),
+               NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "matern_3_2", alpha = 1.9,
+               trend = cbind(rep(1,n),X_train_ordered[,1]), isotropic = F, zero_mean = "No")
+
+temp = fisher(ini_param = c(eta,tau), tau = tau , nugget_est = TRUE, x = as.matrix(X_train_ordered),
+               NNmatrix = nnmatrix_train, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), kernel_type = "matern_3_2", alpha = 1.9,
+               trend = cbind(rep(1,n),X_train_ordered[,1]), zero_mean = "No")
+
+
+learned_gamma = exp(-temp[1:length(temp)-1])
+learned_nu = exp(temp[length(temp)])
+learned_gamma = c(0.8743602, 1.478005, 4.138148)
+learned_nu =  0.01261018
+
+list = predict(x = as.matrix(X_train_ordered), xp = as.matrix(X_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(Y_train_ordered_log_1[,-index_all_zero]), gamma = learned_gamma, nu = learned_nu, kernel_type = "matern_3_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = cbind(rep(1,n),X_train_ordered[,1]), testing_trend = cbind(rep(1,n_testing),X_test_ordered[,1]), isotropic = F, zero_mean = "No")
+
+# transform back
+vec_ppgasp_mean=exp(list[[1]])-1
+vec_ppgasp_LB=exp(list[[2]])-1
+vec_ppgasp_UB=exp(list[[3]])-1
+vec_ppgasp_mean[which(vec_ppgasp_mean<0)]=0
+vec_ppgasp_LB[which(vec_ppgasp_LB<0)]=0
+vec_ppgasp_UB[which(vec_ppgasp_UB<0)]=0
+
+mse(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_mean)
+pci(as.matrix(Y_test_ordered[,-index_all_zero]), vec_ppgasp_LB, vec_ppgasp_UB)
+lci(vec_ppgasp_LB, vec_ppgasp_UB)
+
+m.ppgasp
+```
+
+```{r alec_data}
+sourceCpp("src/demo.cpp")
+load("src/ini_4potentials_data.RData")
+
+delete_index = which(rho_record[1,]==0)
+sd_threshold = 0.01
+alphalevel = 0.05
+N = 2000
+a = 1
+L = 9
+k = 1001
+
+# group 4
+# n training
+n = 1000
+n_test = N - n
+train_index = 1:n
+group = 4
+
+rho_group4 = rho_record[(1:N+(group-1)*N),]
+be_V_group4 = be_V_ext_record[(1:N+(group-1)*N),]
+be_mu_group4 = be_mu_record[(1:N+(group-1)*N)]
+be_Omega_group4 = be_Omega_record[(1:N+(group-1)*N)]
+
+input = matrix(be_mu_group4,ncol = k-length(delete_index),nrow = N)-be_V_group4[,-delete_index]
+output = rho_group4[,-delete_index]
+
+set.seed(2001)
+maxmin_order <- GpGp::order_maxmin(input)
+input_ordered <- input[maxmin_order,]
+output_ordered <- output[maxmin_order, ]
+be_Omega_ordered <- be_Omega_group4[maxmin_order]
+be_Omega_test_ordered <- be_Omega_ordered[(n+1):N]
+
+input_train_ordered = input_ordered[1:n,]
+input_test_ordered = input_ordered[(n+1):N,]
+output_train_ordered = output_ordered[1:n,] 
+output_test_ordered = output_ordered[(n+1):N,]
+
+start_time = Sys.time()
+m_GP=ppgasp(design=input_train_ordered,response=output_train_ordered,nugget.est=T,lower_bound=F,
+              isotropic = T,optimization="nelder-mead",num_initial_values = 1)
+end_time = Sys.time()
+end_time - start_time
+# Time difference of 1.630299 mins
+
+m_pred=predict.ppgasp(m_GP,input_test_ordered)
+pred_rho_di = m_pred$mean #predicted density with deleted index
+RMSE = sqrt(mean((pred_rho_di-output_test_ordered)^2))
+coverage = sum(output_test_ordered>=m_pred$lower95 & output_test_ordered<= m_pred$upper95)/length(m_pred$lower95)
+#length
+length95 = mean(m_pred$upper95-m_pred$lower95)
+
+pred_ori4 = energy_pred_NRMSE(n_test=n_test, pred_rho_di=pred_rho_di, 
+                              a=a, L=L, k=k, 
+                              be_Omega_test=be_Omega_test_ordered, delete_index=delete_index, plot=F)
+pred_ori4$be_Omega_RMSE
+
+set.seed(2001)
+m = 15
+nnmatrix_all <- GpGp::find_ordered_nn(input_ordered, m = m)
+nnmatrix_train <- GpGp::find_ordered_nn(input_train_ordered, m = m)
+
+set.seed(2001)
+gamma = runif(n = 1, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+eta = log(1/gamma)
+tau = log(nu)
+
+set.seed(2001)
+start_time = Sys.time()
+res = optim(par = c(eta,tau), fn = neg_vecchia_marginal_log_likelihood, gr = neg_vecchia_marginal_log_likelihood_deriv, method = "L-BFGS-B", lower = c(-30, -30), control = list(maxit = 10, factr = 1e5), nu = 1, nugget_est = TRUE, x = as.matrix(input_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(output_train_ordered), kernel_type = "matern_5_2", alpha = 1.9, trend=cbind(rep(1,n),input_train_ordered[,1]), isotropic = T, zero_mean = "Yes")
+end_time = Sys.time()
+end_time - start_time
+
+neg_vecchia_marginal_log_likelihood(params = c(10.529, -30.175), nu = 1, nugget_est = TRUE, x = as.matrix(input_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(output_train_ordered), kernel_type = "matern_5_2", alpha = 1.9, trend=cbind(rep(1,n),input_train_ordered[,1]), isotropic = T, zero_mean = "Yes")
+
+gamma_trained = exp(-res$par[-length(res$par)])
+nu_trained = exp(res$par[length(res$par)])
+start_time = Sys.time()
+list = predict(x = as.matrix(input_train_ordered), xp = as.matrix(input_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(output_train_ordered), gamma = gamma_trained, nu = nu_trained, kernel_type = "matern_5_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = cbind(rep(1,n),input_train_ordered[,1]), testing_trend = cbind(rep(1,n),input_test_ordered[,1]), isotropic = T, zero_mean = "Yes")
+end_time = Sys.time()
+end_time - start_time
+
+vec_mean = list[[1]]
+vec_lb = list[[2]]
+vec_ub = list[[3]]
+sqrt(mse(vec_mean, output_test_ordered)) 
+pci(output_test_ordered, vec_lb, vec_ub)
+lci(vec_lb, vec_ub)
+
+vec_pred_ori4 = energy_pred_NRMSE(n_test=n_test, pred_rho_di=vec_mean, 
+                              a=a, L=L, k=k, 
+                              be_Omega_test=be_Omega_test_ordered, delete_index=delete_index, plot=F)
+vec_pred_ori4$be_Omega_RMSE
+
+pci(as.matrix(output_test_ordered), m_pred$lower95, m_pred$upper95)
+lci(m_pred$lower95, m_pred$upper95)
+```
+
+```{r fisher_alec}
+set.seed(2001)
+m = 15
+nnmatrix_all <- GpGp::find_ordered_nn(input_ordered, m = m)
+nnmatrix_train <- GpGp::find_ordered_nn(input_train_ordered, m = m)
+
+set.seed(2001)
+gamma = runif(n = 1, min = gamma_range[1], max = gamma_range[2])
+nu = runif(n = 1, min = nugget_range[1], max = nugget_range[2])
+eta = log(1/gamma)
+tau = log(nu)
+
+start_time <- Sys.time()
+temp = fisher(ini_param = c(eta,tau), tau = tau , nugget_est = TRUE, x = as.matrix(input_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(output_train_ordered), kernel_type = "matern_5_2", alpha = 1.9, trend=cbind(rep(1,n),input_train_ordered[,1]), isotropic = T, zero_mean = "Yes")
+end_time <- Sys.time()
+end_time - start_time
+learned_gamma = exp(-temp[1:length(temp)-1])
+learned_nu = exp(temp[length(temp)])
+
+list = predict(x = as.matrix(input_train_ordered), xp = as.matrix(input_test_ordered), NNmatrix = nnmatrix_all, y = as.matrix(output_train_ordered), gamma = learned_gamma, nu = learned_nu, kernel_type = "matern_5_2", alpha = 1.9, q_95 = qnorm(0.975, 0, 1), trend = cbind(rep(1,n),input_train_ordered[,1]), testing_trend = cbind(rep(1,n),input_test_ordered[,1]), isotropic = T, zero_mean = "Yes")
+
+vec_mean = list[[1]]
+vec_lb = list[[2]]
+vec_ub = list[[3]]
+sqrt(mean((vec_mean-output_test_ordered)^2))
+pci(as.matrix(output_test_ordered), vec_lb, vec_ub)
+lci(vec_lb, vec_ub)
+
+fisher_scoring(param = c(eta,tau), tau = tau , nugget_est = TRUE, x = as.matrix(input_train_ordered), NNmatrix = nnmatrix_train, y = as.matrix(output_train_ordered), kernel_type = "matern_3_2", alpha = 1.9, trend=cbind(rep(1,n),input_train_ordered[,1]), isotropic = T, zero_mean = "No")
+```
+
+```{r GpGp_compare}
 
 ```
+
+```{r scalability}
+
+```
+
+
+
+
 
 
 
